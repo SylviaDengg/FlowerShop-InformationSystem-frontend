@@ -9,7 +9,7 @@ import SwiftUI
 
 // MARK: - 花卉类型
 struct Flower: Identifiable, Equatable {
-    let id = UUID()
+    var id: String = UUID().uuidString
     let name: String
     let englishName: String
     let color: Color
@@ -50,7 +50,7 @@ enum FlowerCategory: String, CaseIterable {
 
 // MARK: - 花束中的花卉项
 struct BouquetItem: Identifiable {
-    let id = UUID()
+    var id: String = UUID().uuidString
     let flower: Flower
     var quantity: Int
     var position: CGPoint  // 在预览中的位置
@@ -60,7 +60,7 @@ struct BouquetItem: Identifiable {
 
 // MARK: - 花束
 struct Bouquet: Identifiable {
-    let id = UUID()
+    var id: String = UUID().uuidString
     var name: String
     var items: [BouquetItem]
     var wrappingStyle: WrappingStyle

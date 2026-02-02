@@ -9,7 +9,7 @@ import SwiftUI
 
 struct BouquetPreviewView: View {
     @ObservedObject var viewModel: BouquetViewModel
-    @State private var selectedItemId: UUID? = nil
+    @State private var selectedItemId: String? = nil
     
     var body: some View {
         VStack(spacing: 0) {

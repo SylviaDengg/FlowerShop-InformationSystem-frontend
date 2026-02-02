@@ -10,10 +10,18 @@ import Combine
 
 class BouquetViewModel: ObservableObject {
     @Published var currentBouquet: Bouquet
-    @Published var availableFlowers: [Flower] = Flower.sampleFlowers
+    @Published var availableFlowers: [Flower] = []
     @Published var selectedCategory: FlowerCategory? = nil
     @Published var savedBouquets: [Bouquet] = []
     @Published var orders: [FlowerOrder] = []
+    @Published var isLoading = false
+    @Published var errorMessage: String?
+    
+    // Firebase 服务
+    private let flowerService = FlowerService()
+    private let orderService = OrderService()
+    private let bouquetService = BouquetService()
+    private var cancellables = Set<AnyCancellable>()
     
     init() {
         self.currentBouquet = Bouquet(
@@ -24,6 +32,50 @@ class BouquetViewModel: ObservableObject {
             note: "",
             createdAt: Date()
         )
+        
+        // 订阅花卉服务的数据变化
+        setupBindings()
+        
+        // 加载本地示例数据作为后备
+        loadLocalFlowersIfNeeded()
+    }
+    
+    // MARK: - 设置数据绑定
+    private func setupBindings() {
+        // 监听从 Firebase 获取的花卉数据
+        flowerService.$flowers
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] flowerDataList in
+                if !flowerDataList.isEmpty {
+                    self?.availableFlowers = flowerDataList.map { $0.toFlower() }
+                }
+            }
+            .store(in: &cancellables)
+        
+        // 监听加载状态
+        flowerService.$isLoading
+            .receive(on: DispatchQueue.main)
+            .assign(to: &$isLoading)
+        
+        // 监听错误
+        flowerService.$error
+            .receive(on: DispatchQueue.main)
+            .assign(to: &$errorMessage)
+    }
+    
+    // MARK: - 如果 Firebase 没有数据，加载本地示例
+    private func loadLocalFlowersIfNeeded() {
+        // 延迟检查，如果 Firebase 没有返回数据，使用本地数据
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
+            if self?.availableFlowers.isEmpty == true {
+                self?.availableFlowers = Flower.sampleFlowers
+            }
+        }
+    }
+    
+    // MARK: - 初始化 Firebase 示例数据
+    func seedFlowersToFirebase() {
+        flowerService.seedSampleFlowers()
     }
     
     // MARK: - 花卉筛选
@@ -73,21 +125,21 @@ class BouquetViewModel: ObservableObject {
     }
     
     // MARK: - 更新花卉位置
-    func updatePosition(for itemId: UUID, to position: CGPoint) {
+    func updatePosition(for itemId: String, to position: CGPoint) {
         if let index = currentBouquet.items.firstIndex(where: { $0.id == itemId }) {
             currentBouquet.items[index].position = position
         }
     }
     
     // MARK: - 更新花卉缩放
-    func updateScale(for itemId: UUID, to scale: CGFloat) {
+    func updateScale(for itemId: String, to scale: CGFloat) {
         if let index = currentBouquet.items.firstIndex(where: { $0.id == itemId }) {
             currentBouquet.items[index].scale = scale
         }
     }
     
     // MARK: - 更新花卉旋转
-    func updateRotation(for itemId: UUID, to rotation: Double) {
+    func updateRotation(for itemId: String, to rotation: Double) {
         if let index = currentBouquet.items.firstIndex(where: { $0.id == itemId }) {
             currentBouquet.items[index].rotation = rotation
         }
@@ -115,31 +167,61 @@ class BouquetViewModel: ObservableObject {
         )
     }
     
-    // MARK: - 保存花束
-    func saveBouquet() {
-        savedBouquets.append(currentBouquet)
+    // MARK: - 保存花束到 Firebase
+    func saveBouquet(completion: ((Bool) -> Void)? = nil) {
+        bouquetService.saveBouquet(currentBouquet) { [weak self] result in
+            DispatchQueue.main.async {
+                switch result {
+                case .success:
+                    self?.savedBouquets.append(self!.currentBouquet)
+                    completion?(true)
+                case .failure(let error):
+                    self?.errorMessage = error.localizedDescription
+                    completion?(false)
+                }
+            }
+        }
     }
     
-    // MARK: - 提交订单
+    // MARK: - 提交订单到 Firebase
     func submitOrder(
         customerName: String,
         customerPhone: String,
         deliveryAddress: String,
         deliveryDate: Date,
-        specialRequests: String
-    ) -> FlowerOrder {
-        let order = FlowerOrder(
+        specialRequests: String,
+        completion: @escaping (Result<FlowerOrder, Error>) -> Void
+    ) {
+        orderService.submitOrder(
             bouquet: currentBouquet,
             customerName: customerName,
             customerPhone: customerPhone,
             deliveryAddress: deliveryAddress,
             deliveryDate: deliveryDate,
-            specialRequests: specialRequests,
-            status: .pending,
-            createdAt: Date()
-        )
-        orders.append(order)
-        return order
+            specialRequests: specialRequests
+        ) { [weak self] result in
+            DispatchQueue.main.async {
+                switch result {
+                case .success:
+                    // 创建本地订单对象用于显示
+                    let order = FlowerOrder(
+                        bouquet: self!.currentBouquet,
+                        customerName: customerName,
+                        customerPhone: customerPhone,
+                        deliveryAddress: deliveryAddress,
+                        deliveryDate: deliveryDate,
+                        specialRequests: specialRequests,
+                        status: .pending,
+                        createdAt: Date()
+                    )
+                    self?.orders.append(order)
+                    completion(.success(order))
+                case .failure(let error):
+                    self?.errorMessage = error.localizedDescription
+                    completion(.failure(error))
+                }
+            }
+        }
     }
     
     // MARK: - 生成订单描述（发送给商家）

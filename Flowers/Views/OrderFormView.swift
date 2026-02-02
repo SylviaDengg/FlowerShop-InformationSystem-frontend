@@ -18,6 +18,7 @@ struct OrderFormView: View {
     @State private var specialRequests = ""
     @State private var showingConfirmation = false
     @State private var submittedOrder: FlowerOrder?
+    @State private var isSubmitting = false
     
     var isFormValid: Bool {
         !customerName.isEmpty && !customerPhone.isEmpty && !deliveryAddress.isEmpty
@@ -95,14 +96,19 @@ struct OrderFormView: View {
                     Button(action: submitOrder) {
                         HStack {
                             Spacer()
-                            Text("提交订单")
-                                .fontWeight(.semibold)
+                            if isSubmitting {
+                                ProgressView()
+                                    .progressViewStyle(CircularProgressViewStyle(tint: .white))
+                            } else {
+                                Text("提交订单")
+                                    .fontWeight(.semibold)
+                            }
                             Spacer()
                         }
                     }
-                    .disabled(!isFormValid)
+                    .disabled(!isFormValid || isSubmitting)
                     .foregroundColor(isFormValid ? .white : .gray)
-                    .listRowBackground(isFormValid ? Color.pink : Color.gray.opacity(0.3))
+                    .listRowBackground(isFormValid && !isSubmitting ? Color.pink : Color.gray.opacity(0.3))
                 }
             }
             .navigationTitle("确认订单")
@@ -131,15 +137,24 @@ struct OrderFormView: View {
     }
     
     private func submitOrder() {
-        let order = viewModel.submitOrder(
+        isSubmitting = true
+        viewModel.submitOrder(
             customerName: customerName,
             customerPhone: customerPhone,
             deliveryAddress: deliveryAddress,
             deliveryDate: deliveryDate,
             specialRequests: specialRequests
-        )
-        submittedOrder = order
-        showingConfirmation = true
+        ) { result in
+            isSubmitting = false
+            switch result {
+            case .success(let order):
+                submittedOrder = order
+                showingConfirmation = true
+            case .failure(let error):
+                // 处理错误
+                print("订单提交失败: \(error.localizedDescription)")
+            }
+        }
     }
 }
 
