@@ -119,19 +119,15 @@
 }
 ```
 
-### settings / wrapping_options（DIY 包装配置）
-文档路径：`settings/wrapping_options`
+### wrapping_options（DIY 包装配置）
+集合路径：`wrapping_options`
 
 ```json
 {
-  "options": [
-    {
-      "id": "pearl-white",
-      "name": "珍珠白",
-      "imageURL": "https://...",
-      "price": 18
-    }
-  ]
+  "id": "pearl-white",
+  "name": "珍珠白",
+  "imageURL": "https://...",
+  "price": 18
 }
 ```
 

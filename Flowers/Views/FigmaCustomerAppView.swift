@@ -858,9 +858,14 @@ struct BouquetProduct: Identifiable, Hashable {
     
     static func fromBouquet(_ bouquet: BouquetData, availableFlowers: [Flower]) -> BouquetProduct {
         let storedDescription = sanitizedLines(bouquet.descriptionLines)
-        let derivedFlowerLines = bouquet.items
-            .filter { !$0.flowerName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
-            .map { "\($0.flowerName) x\($0.quantity)" }
+        let derivedFlowerLines: [String] = bouquet.items
+            .compactMap { item -> String? in
+                let storedName = sanitizedText(item.flowerName)
+                let resolvedName = storedName
+                    ?? availableFlowers.first(where: { $0.id == item.flowerId })?.name
+                guard let resolvedName else { return nil }
+                return "\(resolvedName) x\(item.quantity)"
+            }
         let descriptionLines = storedDescription.isEmpty
             ? Array((derivedFlowerLines + wrapSummaryLine(from: bouquet)).prefix(3))
             : storedDescription
@@ -881,9 +886,7 @@ struct BouquetProduct: Identifiable, Hashable {
         
         let resolvedPrice = bouquet.totalPrice > 0
             ? bouquet.totalPrice
-            : bouquet.items.reduce(0) { partial, item in
-                partial + (item.flowerPrice * Double(item.quantity))
-            }
+            : computedPrice(for: bouquet, availableFlowers: availableFlowers)
         
         return BouquetProduct(
             id: bouquet.id ?? "bouquet-\(bouquet.name)",
@@ -927,6 +930,16 @@ struct BouquetProduct: Identifiable, Hashable {
             }
         }
         return nil
+    }
+
+    private static func computedPrice(for bouquet: BouquetData, availableFlowers: [Flower]) -> Double {
+        bouquet.items.reduce(0) { partial, item in
+            let fallbackPrice = item.flowerPrice
+            let matchedFlowerPrice = availableFlowers.first(where: { $0.id == item.flowerId })?.price
+                ?? availableFlowers.first(where: { $0.name == item.flowerName })?.price
+                ?? fallbackPrice
+            return partial + (matchedFlowerPrice * Double(item.quantity))
+        }
     }
     
     private static func fallbackLongDescription(for bouquet: BouquetData, descriptionLines: [String]) -> [String] {
@@ -3059,7 +3072,7 @@ private struct DIYBouquetDesignContent: View {
     private var wrappingSelectionContent: some View {
         Group {
             if appModel.availableWrappingOptions.isEmpty {
-                Text("请先在 Firestore 的 settings/wrapping_options 配好包装名称、价格和参考图。")
+                Text("请先在 Firestore 的 wrapping_options collection 配好包装名称、价格和参考图。")
                     .font(.system(size: 13, weight: .medium))
                     .foregroundColor(.secondary)
                     .frame(maxWidth: .infinity, alignment: .leading)

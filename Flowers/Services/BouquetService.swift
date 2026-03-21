@@ -118,7 +118,6 @@ class BouquetService: ObservableObject {
         listener?.remove()
         
         listener = db.collection("bouquets")
-            .order(by: "createdAt", descending: true)
             .limit(to: 50)
             .addSnapshotListener { [weak self] snapshot, error in
                 self?.isLoading = false
@@ -138,7 +137,10 @@ class BouquetService: ObservableObject {
                     bouquet.isPublished != false && bouquet.isTemplate != true
                 }
                 
-                self?.catalogBouquets = publishedBouquets.isEmpty ? bouquets : publishedBouquets
+                let resolvedBouquets = publishedBouquets.isEmpty ? bouquets : publishedBouquets
+                self?.catalogBouquets = resolvedBouquets.sorted { lhs, rhs in
+                    lhs.createdAt > rhs.createdAt
+                }
             }
     }
     
@@ -153,13 +155,16 @@ class BouquetService: ObservableObject {
         }
         
         let itemsArray = data["items"] as? [[String: Any]] ?? []
-        let items = itemsArray.map { itemDict in
+        let componentsArray = data["components"] as? [[String: Any]] ?? []
+        
+        let itemPayloads = itemsArray.isEmpty ? componentsArray : itemsArray
+        let items = itemPayloads.map { itemDict in
             BouquetItemData(
-                flowerId: itemDict["flowerId"] as? String ?? "",
+                flowerId: (itemDict["flowerId"] as? String) ?? (itemDict["flower_id"] as? String) ?? "",
                 flowerName: itemDict["flowerName"] as? String ?? "",
                 flowerEmoji: itemDict["flowerEmoji"] as? String ?? "🌸",
-                flowerPrice: itemDict["flowerPrice"] as? Double ?? 0,
-                quantity: itemDict["quantity"] as? Int ?? 1,
+                flowerPrice: (itemDict["flowerPrice"] as? NSNumber)?.doubleValue ?? 0,
+                quantity: (itemDict["quantity"] as? NSNumber)?.intValue ?? 1,
                 positionX: itemDict["positionX"] as? Double ?? 0,
                 positionY: itemDict["positionY"] as? Double ?? 0,
                 scale: itemDict["scale"] as? Double ?? 1,

@@ -48,8 +48,8 @@ struct StorefrontWrappingOptionData: Identifiable, Equatable {
     let imageURL: String
     let price: Double
     
-    static let documentPath = "settings/wrapping_options"
-    
+    static let collectionPath = "wrapping_options"
+
     init?(data: [String: Any]) {
         let resolvedID = StorefrontPreviewConfiguration.firstNonEmptyString(
             data["id"],
@@ -114,8 +114,7 @@ final class StorefrontConfigService: ObservableObject {
                 self?.previewConfiguration = StorefrontPreviewConfiguration(data: data)
             }
         
-        wrappingListener = db.collection("settings")
-            .document("wrapping_options")
+        wrappingListener = db.collection("wrapping_options")
             .addSnapshotListener { [weak self] snapshot, error in
                 self?.hasResolvedWrappingOptions = true
                 
@@ -125,14 +124,14 @@ final class StorefrontConfigService: ObservableObject {
                     return
                 }
                 
-                guard let data = snapshot?.data(),
-                      let rawOptions = data["options"] as? [[String: Any]] else {
-                    self?.wrappingOptions = []
-                    return
-                }
+                let wrappingOptions: [StorefrontWrappingOptionData] = snapshot?.documents.compactMap { document in
+                    var payload = document.data()
+                    payload["id"] = payload["id"] ?? document.documentID
+                    return StorefrontWrappingOptionData(data: payload)
+                } ?? []
                 
-                self?.wrappingOptions = rawOptions.compactMap { option in
-                    StorefrontWrappingOptionData(data: option)
+                self?.wrappingOptions = wrappingOptions.sorted {
+                    $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
                 }
             }
     }
