@@ -53,6 +53,8 @@ struct FlowerData: Identifiable {
     let isAvailable: Bool?
     let stockQuantity: Int?
     let image: String?
+    let imageURL: String?
+    let referenceImageURL: String?
     let inventoryCode: String?
     let inventory_code: String?
     let unit: String?
@@ -79,6 +81,8 @@ struct FlowerData: Identifiable {
         self.isAvailable = data["isAvailable"] as? Bool
         self.stockQuantity = (data["stockQuantity"] as? NSNumber)?.intValue
         self.image = data["image"] as? String
+        self.imageURL = data["imageURL"] as? String
+        self.referenceImageURL = data["referenceImageURL"] as? String
         self.inventoryCode = data["inventoryCode"] as? String
         self.inventory_code = data["inventory_code"] as? String
         self.unit = data["unit"] as? String
@@ -118,6 +122,18 @@ struct FlowerData: Identifiable {
         return season
     }
     
+    var resolvedImageURL: String? {
+        let candidates = [image, imageURL, referenceImageURL]
+        for candidate in candidates {
+            guard let value = candidate?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !value.isEmpty else {
+                continue
+            }
+            return value
+        }
+        return nil
+    }
+    
     func toFlower() -> Flower {
         Flower(
             id: resolvedId,
@@ -129,7 +145,7 @@ struct FlowerData: Identifiable {
             category: resolvedCategory,
             categoryName: category,
             description: description,
-            imageURL: URL(string: image ?? ""),
+            imageURL: URL(string: resolvedImageURL ?? ""),
             stockQuantity: stockQuantity,
             inventoryCode: resolvedInventoryCode,
             unit: resolvedUnit,

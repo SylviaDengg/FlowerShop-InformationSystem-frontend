@@ -86,7 +86,7 @@ struct AIBouquetPreviewService {
         
         let referencePreparation = await prepareReferenceImages(from: chosenSelections, wrappingOption: wrappingOption)
         if requireReferenceImages, referencePreparation.payloads.count < referencePreparation.expectedCount {
-            throw AIPreviewError.referenceImageUnavailable
+            throw AIPreviewError.referenceImageUnavailable(referencePreparation.failures)
         }
         let prompt = buildPrompt(requirement: requirement, selections: chosenSelections, wrappingOption: wrappingOption)
         let requestBody = ArkImageGenerationRequest(
@@ -265,69 +265,147 @@ struct AIBouquetPreviewService {
             .trimmingCharacters(in: .whitespacesAndNewlines)
     }
     
-    private func uniqueReferenceImages(from selections: [AIBouquetSelection], wrappingOption: BouquetWrappingOption?) -> [URL] {
+    private func referenceImageCandidates(from selections: [AIBouquetSelection], wrappingOption: BouquetWrappingOption?) -> [ReferenceImageCandidate] {
         var seen = Set<String>()
-        var urls: [URL] = []
+        var candidates: [ReferenceImageCandidate] = []
         
         for selection in selections {
-            guard let url = selection.flower.imageURL else { continue }
-            if seen.insert(url.absoluteString).inserted {
-                urls.append(url)
-            }
-        }
-        
-        if let wrappingURL = wrappingOption?.referenceURL,
-           seen.insert(wrappingURL.absoluteString).inserted {
-            urls.append(wrappingURL)
-        }
-        
-        return urls
-    }
-    
-    private func prepareReferenceImages(from selections: [AIBouquetSelection], wrappingOption: BouquetWrappingOption?) async -> (payloads: [String], sourceURLs: [URL], expectedCount: Int) {
-        let candidateURLs = uniqueReferenceImages(from: selections, wrappingOption: wrappingOption)
-        var payloads: [String] = []
-        var sourceURLs: [URL] = []
-        
-        for url in candidateURLs {
-            guard let encodedImage = await downloadAndEncodeImage(from: url) else {
+            guard let source = normalizedReferenceSource(selection.flower.imageURL?.absoluteString),
+                  let url = URL(string: source),
+                  seen.insert(source).inserted else {
                 continue
             }
-            payloads.append(encodedImage)
-            sourceURLs.append(url)
+            candidates.append(
+                ReferenceImageCandidate(
+                    label: "花材“\(selection.flower.name)”",
+                    source: source,
+                    url: url
+                )
+            )
         }
         
-        return (payloads, sourceURLs, candidateURLs.count)
+        if let wrappingOption,
+           let source = normalizedReferenceSource(wrappingOption.imageURL),
+           let url = URL(string: source),
+           seen.insert(source).inserted {
+            candidates.append(
+                ReferenceImageCandidate(
+                    label: "包装“\(wrappingOption.name)”",
+                    source: source,
+                    url: url
+                )
+            )
+        }
+        
+        return candidates
     }
     
-    private func downloadAndEncodeImage(from url: URL) async -> String? {
+    private func normalizedReferenceSource(_ rawValue: String?) -> String? {
+        guard let rawValue else { return nil }
+        let trimmed = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+    
+    private func prepareReferenceImages(from selections: [AIBouquetSelection], wrappingOption: BouquetWrappingOption?) async -> ReferenceImagePreparationResult {
+        let candidates = referenceImageCandidates(from: selections, wrappingOption: wrappingOption)
+        var payloads: [String] = []
+        var sourceURLs: [URL] = []
+        var failures: [String] = []
+        
+        for candidate in candidates {
+            switch await loadReferenceImage(from: candidate) {
+            case .success(let encodedImage):
+                payloads.append(encodedImage)
+                sourceURLs.append(candidate.url)
+            case .failure(let reason):
+                failures.append("\(candidate.label)：\(reason)")
+            }
+        }
+        
+        return ReferenceImagePreparationResult(
+            payloads: payloads,
+            sourceURLs: sourceURLs,
+            expectedCount: candidates.count,
+            failures: failures
+        )
+    }
+    
+    private func loadReferenceImage(from candidate: ReferenceImageCandidate) async -> ReferenceImageLoadResult {
+        switch candidate.url.scheme?.lowercased() {
+        case "http", "https":
+            return await downloadAndEncodeImage(from: candidate.url)
+        case "data":
+            return decodeDataImage(from: candidate.source)
+        case let scheme?:
+            return .failure("暂不支持 `\(scheme)` 协议的图片链接。")
+        default:
+            return .failure("图片链接格式无效。")
+        }
+    }
+    
+    private func decodeDataImage(from source: String) -> ReferenceImageLoadResult {
+        guard let separatorIndex = source.firstIndex(of: ",") else {
+            return .failure("`data:` 图片缺少内容。")
+        }
+        
+        let metadata = String(source[..<separatorIndex]).lowercased()
+        let payload = String(source[source.index(after: separatorIndex)...])
+        guard metadata.hasPrefix("data:image/") else {
+            return .failure("`data:` 链接不是图片。")
+        }
+        
+        let rawData: Data?
+        if metadata.contains(";base64") {
+            rawData = Data(base64Encoded: payload)
+        } else {
+            rawData = payload.removingPercentEncoding?.data(using: .utf8)
+        }
+        
+        guard let rawData else {
+            return .failure("`data:` 图片内容无法解析。")
+        }
+        
+        guard let image = UIImage(data: rawData) else {
+            return .failure("`data:` 链接里的内容不是有效图片。")
+        }
+        
+        let jpegData = image.jpegData(compressionQuality: 0.82)
+            ?? image.jpegData(compressionQuality: 0.65)
+            ?? rawData
+        
+        return .success("data:image/jpeg;base64,\(jpegData.base64EncodedString())")
+    }
+    
+    private func downloadAndEncodeImage(from url: URL) async -> ReferenceImageLoadResult {
         var request = URLRequest(url: url)
         request.timeoutInterval = 20
         request.setValue("image/*", forHTTPHeaderField: "Accept")
         
         do {
             let (data, response) = try await session.data(for: request)
-            guard let httpResponse = response as? HTTPURLResponse,
-                  (200..<300).contains(httpResponse.statusCode) else {
-                return nil
+            guard let httpResponse = response as? HTTPURLResponse else {
+                return .failure("未收到有效的 HTTP 响应。")
+            }
+            guard (200..<300).contains(httpResponse.statusCode) else {
+                return .failure("下载返回了 HTTP \(httpResponse.statusCode)。")
             }
             
             let mimeType = (httpResponse.mimeType ?? "").lowercased()
             if !mimeType.isEmpty, !mimeType.hasPrefix("image/") {
-                return nil
+                return .failure("返回的是 `\(mimeType)`，不是图片。")
             }
             
             guard let image = UIImage(data: data) else {
-                return nil
+                return .failure("下载成功了，但内容不是可解码的图片。")
             }
             
             let jpegData = image.jpegData(compressionQuality: 0.82)
                 ?? image.jpegData(compressionQuality: 0.65)
                 ?? data
             
-            return "data:image/jpeg;base64,\(jpegData.base64EncodedString())"
+            return .success("data:image/jpeg;base64,\(jpegData.base64EncodedString())")
         } catch {
-            return nil
+            return .failure(error.localizedDescription)
         }
     }
     
@@ -373,6 +451,24 @@ struct AIBouquetPreviewService {
             )
         ]
     }
+}
+
+private struct ReferenceImageCandidate {
+    let label: String
+    let source: String
+    let url: URL
+}
+
+private struct ReferenceImagePreparationResult {
+    let payloads: [String]
+    let sourceURLs: [URL]
+    let expectedCount: Int
+    let failures: [String]
+}
+
+private enum ReferenceImageLoadResult {
+    case success(String)
+    case failure(String)
 }
 
 private struct ThemeRule {
@@ -422,7 +518,7 @@ enum AIPreviewError: LocalizedError {
     case missingFlowers
     case missingFlowerReferenceImages([String])
     case missingWrappingReferenceImage(String?)
-    case referenceImageUnavailable
+    case referenceImageUnavailable([String])
     case invalidAPIKeyFormat(String)
     case invalidResponse
     case serverError(String)
@@ -440,8 +536,11 @@ enum AIPreviewError: LocalizedError {
                 return "包装“\(wrappingName)”还没有 Firestore 参考图，当前不能生成真实预览。"
             }
             return "当前所选包装没有 Firestore 参考图，不能生成真实预览。"
-        case .referenceImageUnavailable:
-            return "当前无法拿到 Firestore 里的花材或包装参考图，请检查图片链接后再试。"
+        case .referenceImageUnavailable(let failures):
+            if failures.isEmpty {
+                return "当前无法拿到 Firestore 里的花材或包装参考图，请检查图片链接后再试。"
+            }
+            return "这些参考图当前不可用：\(failures.joined(separator: "；"))"
         case .invalidAPIKeyFormat(let message):
             return message
         case .invalidResponse:
