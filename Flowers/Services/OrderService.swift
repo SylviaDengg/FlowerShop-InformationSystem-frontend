@@ -74,6 +74,12 @@ class OrderService: ObservableObject {
     deinit {
         listener?.remove()
     }
+
+    func stopListening() {
+        listener?.remove()
+        listener = nil
+        isLoading = false
+    }
     
     // MARK: - 提交订单
     func submitOrder(
@@ -255,10 +261,10 @@ class OrderService: ObservableObject {
         }
         
         isLoading = true
+        listener?.remove()
         
         listener = db.collection("orders")
             .whereField("userId", isEqualTo: userId)
-            .order(by: "createdAt", descending: true)
             .addSnapshotListener { [weak self] snapshot, error in
                 self?.isLoading = false
                 
@@ -268,15 +274,17 @@ class OrderService: ObservableObject {
                     return
                 }
                 
-                self?.orders = snapshot?.documents.compactMap { doc in
+                self?.orders = (snapshot?.documents.compactMap { doc in
                     self?.parseOrderDocument(doc)
-                } ?? []
+                } ?? [])
+                .sorted { $0.createdAt > $1.createdAt }
             }
     }
     
     // MARK: - 获取所有订单（商家端使用）
     func fetchAllOrders() {
         isLoading = true
+        listener?.remove()
         
         listener = db.collection("orders")
             .order(by: "createdAt", descending: true)
@@ -316,12 +324,18 @@ class OrderService: ObservableObject {
                 flowerId: itemDict["flowerId"] as? String ?? "",
                 flowerName: itemDict["flowerName"] as? String ?? "",
                 flowerEmoji: itemDict["flowerEmoji"] as? String ?? "🌸",
-                flowerPrice: itemDict["flowerPrice"] as? Double ?? 0,
-                quantity: itemDict["quantity"] as? Int ?? 1,
-                positionX: itemDict["positionX"] as? Double ?? 0,
-                positionY: itemDict["positionY"] as? Double ?? 0,
-                scale: itemDict["scale"] as? Double ?? 1,
-                rotation: itemDict["rotation"] as? Double ?? 0
+                flowerPrice: (itemDict["flowerPrice"] as? NSNumber)?.doubleValue
+                    ?? (itemDict["flowerPrice"] as? Double ?? 0),
+                quantity: (itemDict["quantity"] as? NSNumber)?.intValue
+                    ?? (itemDict["quantity"] as? Int ?? 1),
+                positionX: (itemDict["positionX"] as? NSNumber)?.doubleValue
+                    ?? (itemDict["positionX"] as? Double ?? 0),
+                positionY: (itemDict["positionY"] as? NSNumber)?.doubleValue
+                    ?? (itemDict["positionY"] as? Double ?? 0),
+                scale: (itemDict["scale"] as? NSNumber)?.doubleValue
+                    ?? (itemDict["scale"] as? Double ?? 1),
+                rotation: (itemDict["rotation"] as? NSNumber)?.doubleValue
+                    ?? (itemDict["rotation"] as? Double ?? 0)
             )
         }
         
@@ -334,7 +348,8 @@ class OrderService: ObservableObject {
             note: bouquetDict["note"] as? String ?? "",
             createdAt: (bouquetDict["createdAt"] as? Timestamp)?.dateValue() ?? Date(),
             userId: data["userId"] as? String,
-            totalPrice: bouquetDict["totalPrice"] as? Double ?? 0
+            totalPrice: (bouquetDict["totalPrice"] as? NSNumber)?.doubleValue
+                ?? (bouquetDict["totalPrice"] as? Double ?? 0)
         )
         
         return OrderData(

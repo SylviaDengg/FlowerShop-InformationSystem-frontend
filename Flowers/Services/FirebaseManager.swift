@@ -71,6 +71,64 @@ class FirebaseManager: ObservableObject {
         }
     }
 
+    func fetchCurrentUserProfile() async throws -> UserProfileRecord {
+        guard let user = auth.currentUser else {
+            throw NSError(
+                domain: "FirebaseManager",
+                code: 401,
+                userInfo: [NSLocalizedDescriptionKey: "請先登入後再查看個人資料。"]
+            )
+        }
+
+        let snapshot = try await db.collection("users").document(user.uid).getDocument()
+        return UserProfileRecord(user: user, data: snapshot.data())
+    }
+
+    func updateCurrentUserProfile(
+        displayName: String,
+        email: String,
+        phoneNumber: String
+    ) async throws -> UserProfileRecord {
+        guard let user = auth.currentUser else {
+            throw NSError(
+                domain: "FirebaseManager",
+                code: 401,
+                userInfo: [NSLocalizedDescriptionKey: "請先登入後再修改個人資料。"]
+            )
+        }
+
+        let trimmedDisplayName = displayName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedEmail = email.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedPhoneNumber = phoneNumber.trimmingCharacters(in: .whitespacesAndNewlines)
+        let resolvedEmail = trimmedEmail.isEmpty ? (user.email ?? "") : trimmedEmail
+
+        guard !resolvedEmail.isEmpty else {
+            throw NSError(
+                domain: "FirebaseManager",
+                code: 422,
+                userInfo: [NSLocalizedDescriptionKey: "請輸入有效的聯絡電郵。"]
+            )
+        }
+
+        let data: [String: Any] = [
+            "uid": user.uid,
+            "displayName": trimmedDisplayName,
+            "email": resolvedEmail,
+            "phoneNumber": trimmedPhoneNumber,
+            "updatedAt": FieldValue.serverTimestamp(),
+            "lastLoginAt": FieldValue.serverTimestamp()
+        ]
+
+        try await db.collection("users").document(user.uid).setData(data, merge: true)
+
+        return UserProfileRecord(
+            uid: user.uid,
+            displayName: trimmedDisplayName,
+            email: resolvedEmail,
+            phoneNumber: trimmedPhoneNumber
+        )
+    }
+
     private func upsertUserRecord(for user: User, fallbackEmail: String, isNewUser: Bool) async throws {
         var data: [String: Any] = [
             "uid": user.uid,
@@ -88,6 +146,47 @@ class FirebaseManager: ObservableObject {
         }
 
         try await db.collection("users").document(user.uid).setData(data, merge: true)
+    }
+}
+
+struct UserProfileRecord: Equatable {
+    let uid: String
+    let displayName: String
+    let email: String
+    let phoneNumber: String
+
+    init(uid: String, displayName: String, email: String, phoneNumber: String) {
+        self.uid = uid
+        self.displayName = displayName
+        self.email = email
+        self.phoneNumber = phoneNumber
+    }
+
+    init(user: User, data: [String: Any]?) {
+        let storedDisplayName = (data?["displayName"] as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let storedEmail = (data?["email"] as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let storedPhoneNumber = (data?["phoneNumber"] as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+
+        let fallbackEmail = user.email?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let fallbackDisplayName = user.displayName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let resolvedEmail = storedEmail.isEmpty ? fallbackEmail : storedEmail
+        let emailPrefix = resolvedEmail.split(separator: "@").first.map(String.init) ?? "花店顧客"
+
+        self.uid = user.uid
+        self.displayName = storedDisplayName.isEmpty
+            ? (
+                fallbackDisplayName.isEmpty
+                    ? emailPrefix
+                    : fallbackDisplayName
+            )
+            : storedDisplayName
+        self.email = resolvedEmail
+        self.phoneNumber = storedPhoneNumber.isEmpty
+            ? (user.phoneNumber?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "")
+            : storedPhoneNumber
     }
 }
 

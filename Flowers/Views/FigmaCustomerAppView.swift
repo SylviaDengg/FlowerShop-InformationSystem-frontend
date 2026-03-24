@@ -160,6 +160,8 @@ final class FigmaCustomerAppModel: ObservableObject {
         case farm
         case checkout
         case orderTracking
+        case orderHistory
+        case editProfile
         case notifications
     }
 
@@ -217,6 +219,16 @@ final class FigmaCustomerAppModel: ObservableObject {
     @Published var submittedTrackingOrder: StorefrontTrackingOrder?
     @Published var authErrorTitle = "操作失敗"
     @Published var authErrorMessage: String?
+    @Published private(set) var userOrders: [OrderData] = []
+    @Published private(set) var isLoadingUserOrders = false
+    @Published private(set) var userOrdersErrorMessage: String?
+    @Published var profileRecord: UserProfileRecord?
+    @Published var isLoadingProfile = false
+    @Published var isSavingProfile = false
+    @Published var profileSaveErrorMessage: String?
+    @Published var profileDraftName = ""
+    @Published var profileDraftEmail = ""
+    @Published var profileDraftPhone = ""
     @Published private var restockReminderTargets: [RestockReminderTarget] = []
     @Published private(set) var unreadRestockReminderKeys: Set<String> = []
     @Published private(set) var notificationMessages: [StorefrontNotificationMessage] = []
@@ -249,6 +261,8 @@ final class FigmaCustomerAppModel: ObservableObject {
         setupInventoryBindings()
         setupPreviewConfigurationBindings()
         setupWrappingBindings()
+        setupOrderBindings()
+        setupAuthBindings()
         bouquetService.fetchCatalogBouquets()
         storefrontConfigService.startListening()
 
@@ -256,6 +270,8 @@ final class FigmaCustomerAppModel: ObservableObject {
             authState = .main
             activeTab = .home
             email = FirebaseManager.shared.authenticatedEmail ?? ""
+            refreshUserOrders()
+            loadCurrentUserProfile()
         }
     }
 
@@ -273,8 +289,19 @@ final class FigmaCustomerAppModel: ObservableObject {
     }
 
     var profileDisplayName: String {
+        let storedDisplayName = profileRecord?.displayName.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !storedDisplayName.isEmpty {
+            return storedDisplayName
+        }
+
         if let email = FirebaseManager.shared.authenticatedEmail,
            let userName = email.split(separator: "@").first,
+           !userName.isEmpty {
+            return String(userName)
+        }
+
+        let typedEmail = email.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let userName = typedEmail.split(separator: "@").first,
            !userName.isEmpty {
             return String(userName)
         }
@@ -283,6 +310,11 @@ final class FigmaCustomerAppModel: ObservableObject {
     }
 
     var profileEmailText: String {
+        let storedEmail = profileRecord?.email.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !storedEmail.isEmpty {
+            return storedEmail
+        }
+
         if let authenticatedEmail = FirebaseManager.shared.authenticatedEmail,
            !authenticatedEmail.isEmpty {
             return authenticatedEmail
@@ -293,12 +325,23 @@ final class FigmaCustomerAppModel: ObservableObject {
     }
 
     var profilePhoneText: String {
+        let storedPhoneNumber = profileRecord?.phoneNumber.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !storedPhoneNumber.isEmpty {
+            return storedPhoneNumber
+        }
+
         if let phoneNumber = FirebaseManager.shared.authenticatedPhoneNumber,
            !phoneNumber.isEmpty {
             return phoneNumber
         }
 
         return FirebaseManager.shared.hasAuthenticatedUser ? "未設定" : "訪客模式"
+    }
+
+    var canSaveProfileChanges: Bool {
+        FirebaseManager.shared.hasAuthenticatedUser
+            && !isSavingProfile
+            && !profileDraftEmail.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
     
     var featuredBouquetProduct: BouquetProduct? {
@@ -822,6 +865,19 @@ final class FigmaCustomerAppModel: ObservableObject {
         overlayScreen = .farm
     }
 
+    func openOrderHistory() {
+        activeTab = .profile
+        refreshUserOrders()
+        overlayScreen = .orderHistory
+    }
+
+    func openProfileEditor() {
+        activeTab = .profile
+        profileSaveErrorMessage = nil
+        primeProfileDrafts()
+        overlayScreen = .editProfile
+    }
+
     func openBrowse(mode: BrowseMode) {
         activeTab = .browse
         browseMode = mode
@@ -834,6 +890,34 @@ final class FigmaCustomerAppModel: ObservableObject {
 
     func openNotifications() {
         overlayScreen = .notifications
+    }
+
+    func saveProfileChanges() {
+        guard canSaveProfileChanges else { return }
+
+        isSavingProfile = true
+        profileSaveErrorMessage = nil
+
+        Task { [weak self] in
+            guard let self else { return }
+
+            defer {
+                self.isSavingProfile = false
+            }
+
+            do {
+                let updatedProfile = try await FirebaseManager.shared.updateCurrentUserProfile(
+                    displayName: self.profileDraftName,
+                    email: self.profileDraftEmail,
+                    phoneNumber: self.profileDraftPhone
+                )
+                self.profileRecord = updatedProfile
+                self.email = updatedProfile.email
+                self.overlayScreen = nil
+            } catch {
+                self.profileSaveErrorMessage = error.localizedDescription
+            }
+        }
     }
 
     func cartQuantity(for productID: String) -> Int {
@@ -1267,6 +1351,90 @@ final class FigmaCustomerAppModel: ObservableObject {
         }
     }
 
+    private func setupOrderBindings() {
+        orderService.$orders
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] orders in
+                self?.userOrders = orders
+            }
+            .store(in: &cancellables)
+
+        orderService.$isLoading
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] isLoading in
+                self?.isLoadingUserOrders = isLoading
+            }
+            .store(in: &cancellables)
+
+        orderService.$error
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] error in
+                self?.userOrdersErrorMessage = error
+            }
+            .store(in: &cancellables)
+    }
+
+    private func setupAuthBindings() {
+        FirebaseManager.shared.$currentUser
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] user in
+                guard let self else { return }
+
+                if user != nil {
+                    self.refreshUserOrders()
+                    self.loadCurrentUserProfile()
+                } else {
+                    self.orderService.stopListening()
+                    self.userOrders = []
+                    self.isLoadingUserOrders = false
+                    self.userOrdersErrorMessage = nil
+                    self.profileRecord = nil
+                    self.isLoadingProfile = false
+                    self.isSavingProfile = false
+                    self.profileSaveErrorMessage = nil
+                    self.profileDraftName = ""
+                    self.profileDraftEmail = ""
+                    self.profileDraftPhone = ""
+                }
+            }
+            .store(in: &cancellables)
+    }
+
+    private func refreshUserOrders() {
+        userOrdersErrorMessage = nil
+        orderService.fetchUserOrders()
+    }
+
+    private func loadCurrentUserProfile() {
+        guard FirebaseManager.shared.hasAuthenticatedUser else { return }
+
+        isLoadingProfile = true
+        profileSaveErrorMessage = nil
+
+        Task { [weak self] in
+            guard let self else { return }
+
+            defer {
+                self.isLoadingProfile = false
+            }
+
+            do {
+                let profile = try await FirebaseManager.shared.fetchCurrentUserProfile()
+                self.profileRecord = profile
+                self.email = profile.email
+                self.primeProfileDrafts()
+            } catch {
+                self.profileSaveErrorMessage = error.localizedDescription
+            }
+        }
+    }
+
+    private func primeProfileDrafts() {
+        profileDraftName = profileDisplayName == "訪客" ? "" : profileDisplayName
+        profileDraftEmail = profileEmailText == "訪客模式" ? "" : profileEmailText
+        profileDraftPhone = profilePhoneText == "訪客模式" || profilePhoneText == "未設定" ? "" : profilePhoneText
+    }
+
     private func setupFlowerBindings() {
         flowerService.$flowers
             .receive(on: DispatchQueue.main)
@@ -1390,6 +1558,8 @@ final class FigmaCustomerAppModel: ObservableObject {
         overlayScreen = nil
         email = FirebaseManager.shared.authenticatedEmail ?? email
         password = ""
+        refreshUserOrders()
+        loadCurrentUserProfile()
     }
 
     private func presentAuthError(title: String, message: String) {
@@ -1398,6 +1568,7 @@ final class FigmaCustomerAppModel: ObservableObject {
     }
 
     private func resetSessionStateAfterLogout() {
+        orderService.stopListening()
         authErrorMessage = nil
         authErrorTitle = "操作失敗"
         authState = .welcome
@@ -1407,6 +1578,16 @@ final class FigmaCustomerAppModel: ObservableObject {
         email = ""
         password = ""
         isAuthenticating = false
+        userOrders = []
+        isLoadingUserOrders = false
+        userOrdersErrorMessage = nil
+        profileRecord = nil
+        isLoadingProfile = false
+        isSavingProfile = false
+        profileSaveErrorMessage = nil
+        profileDraftName = ""
+        profileDraftEmail = ""
+        profileDraftPhone = ""
         selectedProduct = BouquetProduct.defaultSelection
         cartItems = []
         browseMode = .materials
@@ -1529,16 +1710,21 @@ final class FigmaCustomerAppModel: ObservableObject {
     }
 
     private var demoCustomerName: String {
-        let trimmedEmail = email.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedEmail.isEmpty else {
+        let trimmedName = profileDisplayName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedName.isEmpty, trimmedName != "訪客" else {
             return "Demo Customer"
         }
 
-        return trimmedEmail.components(separatedBy: "@").first ?? trimmedEmail
+        return trimmedName
     }
 
     private var demoCustomerPhone: String {
-        "+852 0000 0000"
+        let trimmedPhone = profileRecord?.phoneNumber.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !trimmedPhone.isEmpty {
+            return trimmedPhone
+        }
+
+        return "+852 0000 0000"
     }
 
     private func generateSourceOrderId() -> String {
@@ -2244,6 +2430,10 @@ private struct MainFlowScreen: View {
                 CheckoutScreen(appModel: appModel)
             case .orderTracking:
                 OrderTrackingScreen(appModel: appModel)
+            case .orderHistory:
+                OrderHistoryScreen(appModel: appModel)
+            case .editProfile:
+                ProfileEditScreen(appModel: appModel)
             case .notifications:
                 NotificationsScreen(appModel: appModel)
             case nil:
@@ -3848,12 +4038,15 @@ private struct CheckoutInfoSection: View {
     let value: String
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
+        VStack(alignment: .leading, spacing: 6) {
             Text(title)
                 .font(.system(size: 12, weight: .bold))
+                .foregroundColor(.secondary)
 
             Text(value)
-                .font(.system(size: 15, weight: .bold))
+                .font(.system(size: 16, weight: .bold))
+                .foregroundColor(.black)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 }
@@ -3972,146 +4165,121 @@ private struct OrderTrackingScreen: View {
         MainScreenContainer(selectedTab: .cart, appModel: appModel) {
             if let order = appModel.submittedTrackingOrder {
                 ScrollView(showsIndicators: false) {
-                    VStack(alignment: .leading, spacing: 18) {
-                        VStack(alignment: .leading, spacing: 10) {
-                            HStack(alignment: .top) {
-                                Button(action: appModel.dismissTracking) {
-                                    Image(systemName: "chevron.left")
-                                        .font(.system(size: 20, weight: .semibold))
-                                        .foregroundColor(FigmaPalette.palePink)
-                                        .frame(width: 28, height: 28)
-                                }
-                                .buttonStyle(.plain)
-
-                                Spacer()
-
-                                NotificationBellButton(
-                                    unreadCount: appModel.unreadNotificationCount,
-                                    size: 30,
-                                    action: appModel.openNotifications
-                                )
+                    VStack(alignment: .leading, spacing: 22) {
+                        HStack(alignment: .top) {
+                            Button(action: appModel.dismissTracking) {
+                                Image(systemName: "chevron.left")
+                                    .font(.system(size: 20, weight: .semibold))
+                                    .foregroundColor(FigmaPalette.palePink)
+                                    .frame(width: 28, height: 28)
                             }
+                            .buttonStyle(.plain)
 
-                            Text("下單成功!!!")
-                                .font(.system(size: 14, weight: .regular))
+                            Spacer()
 
-                            Text("訂單進度")
-                                .font(.system(size: 29, weight: .bold))
+                            NotificationBellButton(
+                                unreadCount: appModel.unreadNotificationCount,
+                                size: 30,
+                                action: appModel.openNotifications
+                            )
                         }
                         .padding(.top, 18)
 
-                        RoundedRectangle(cornerRadius: 34, style: .continuous)
-                            .fill(FigmaPalette.softPink)
-                            .overlay {
-                                HStack(spacing: 14) {
-                                    RoundedRectangle(cornerRadius: 28, style: .continuous)
-                                        .fill(Color.white)
-                                        .frame(width: 118, height: 106)
-                                        .overlay {
-                                            RemoteAssetImage(
-                                                urlString: order.primaryItem?.imageURL ?? "",
-                                                fallbackSystemName: "gift.fill",
-                                                contentMode: .fit
-                                            )
-                                            .padding(14)
-                                        }
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("付款成功")
+                                .font(.system(size: 13, weight: .bold))
+                                .foregroundColor(FigmaPalette.hotPink)
 
-                                    VStack(alignment: .leading, spacing: 8) {
-                                        Text(order.title)
-                                            .font(.system(size: 18, weight: .bold))
-                                        Text("付款方式：\(order.paymentMethod.rawValue)")
-                                            .font(.system(size: 12, weight: .regular))
-                                            .foregroundColor(.secondary)
-                                        Text("總額：HKD \(Int(order.totalPrice.rounded()))")
-                                            .font(.system(size: 16, weight: .bold))
-                                    }
+                            Text("訂單已建立")
+                                .font(.system(size: 30, weight: .bold))
+                                .foregroundColor(.black)
 
-                                    Spacer(minLength: 0)
-
-                                    Image(systemName: "sparkles")
-                                        .font(.system(size: 38, weight: .regular))
-                                        .foregroundColor(.blue.opacity(0.9))
-                                        .padding(.trailing, 10)
-                                }
-                                .padding(.horizontal, 15)
-                                .padding(.vertical, 14)
-                            }
-                            .frame(height: 133)
-
-                        CheckoutInfoSection(
-                            title: "地點：",
-                            value: order.pickupLocation
-                        )
-
-                        CheckoutInfoSection(
-                            title: "預計取貨時間",
-                            value: timeText(from: order.pickupDate)
-                        )
-
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text("備註：")
-                                .font(.system(size: 12, weight: .bold))
-                            Text(order.note)
-                                .font(.system(size: 15, weight: .bold))
+                            Text("花藝師已收到你的訂單，以下是目前的配送與取貨安排。")
+                                .font(.system(size: 14, weight: .regular))
+                                .foregroundColor(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
                         }
 
-                        RoundedRectangle(cornerRadius: 34, style: .continuous)
-                            .fill(Color.white)
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 34, style: .continuous)
-                                    .stroke(FigmaPalette.softPink.opacity(0.75), lineWidth: 1.2)
+                        OrderTrackingSummaryCard(order: order)
+
+                        VStack(spacing: 12) {
+                            TrackingMetaCard(
+                                iconName: "number",
+                                title: "訂單號碼",
+                                value: order.sourceOrderId
                             )
-                            .shadow(color: FigmaPalette.softPink.opacity(0.55), radius: 14, x: 0, y: 6)
-                            .overlay {
-                                VStack(alignment: .leading, spacing: 16) {
-                                    Text("訂單進度")
-                                        .font(.system(size: 16, weight: .bold))
+                            TrackingMetaCard(
+                                iconName: "calendar",
+                                title: "下單時間",
+                                value: dateTimeText(from: order.createdAt)
+                            )
+                        }
 
-                                    VStack(alignment: .leading, spacing: 4) {
-                                        Text("訂單號碼 \(order.sourceOrderId)")
-                                            .font(.system(size: 19, weight: .bold))
-                                        Text("下單時間 \(dateTimeText(from: order.createdAt))")
-                                            .font(.system(size: 16, weight: .bold))
-                                    }
+                        VStack(alignment: .leading, spacing: 14) {
+                            Text("配送 / 取貨資訊")
+                                .font(.system(size: 18, weight: .bold))
 
-                                    ZStack(alignment: .leading) {
-                                        Capsule(style: .continuous)
-                                            .stroke(Color.black, lineWidth: 1)
-                                            .frame(height: 14)
-                                        Capsule(style: .continuous)
-                                            .fill(FigmaPalette.softPink)
-                                            .frame(width: 238, height: 6)
-                                            .padding(.leading, 6)
-                                        Image(systemName: "gift.fill")
-                                            .font(.system(size: 14, weight: .regular))
-                                            .foregroundColor(FigmaPalette.hotPink)
-                                            .frame(maxWidth: .infinity, alignment: .trailing)
-                                            .padding(.trailing, 22)
-                                    }
+                            CheckoutInfoSection(
+                                title: "地點",
+                                value: order.pickupLocation
+                            )
 
-                                    VStack(spacing: 18) {
-                                        ForEach(Array(progressSteps(for: order).enumerated()), id: \.offset) { _, step in
-                                            HStack(alignment: .top, spacing: 12) {
-                                                Image(systemName: step.isCompleted ? "sparkles" : "circle.dashed")
-                                                    .font(.system(size: 18, weight: .regular))
-                                                    .foregroundColor(step.isCompleted ? FigmaPalette.hotPink : .gray)
-                                                    .frame(width: 24)
+                            CheckoutInfoSection(
+                                title: "預計取貨時間",
+                                value: "\(dateText(from: order.pickupDate)) · \(order.pickupWindowText)"
+                            )
+                        }
+                        .padding(20)
+                        .background(
+                            RoundedRectangle(cornerRadius: 26, style: .continuous)
+                                .fill(FigmaPalette.softPink.opacity(0.26))
+                        )
 
-                                                VStack(alignment: .leading, spacing: 2) {
-                                                    Text(step.title)
-                                                        .font(.system(size: 16, weight: .bold))
-                                                    Text(step.subtitle)
-                                                        .font(.system(size: 16, weight: .bold))
-                                                }
-
-                                                Spacer()
-                                            }
-                                        }
-                                    }
-                                }
-                                .padding(.horizontal, 20)
-                                .padding(.vertical, 22)
+                        if !order.note.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                            VStack(alignment: .leading, spacing: 8) {
+                                Text("備註")
+                                    .font(.system(size: 14, weight: .bold))
+                                Text(order.note)
+                                    .font(.system(size: 15, weight: .medium))
+                                    .foregroundColor(.black.opacity(0.78))
+                                    .fixedSize(horizontal: false, vertical: true)
                             }
+                            .padding(20)
+                            .background(
+                                RoundedRectangle(cornerRadius: 24, style: .continuous)
+                                    .fill(Color.white)
+                                    .overlay(
+                                        RoundedRectangle(cornerRadius: 24, style: .continuous)
+                                            .stroke(FigmaPalette.softPink.opacity(0.75), lineWidth: 1)
+                                    )
+                            )
+                        }
+
+                        VStack(alignment: .leading, spacing: 18) {
+                            Text("訂單進度")
+                                .font(.system(size: 18, weight: .bold))
+
+                            ForEach(Array(progressSteps(for: order).enumerated()), id: \.offset) { index, step in
+                                OrderTimelineStepView(
+                                    step: step,
+                                    isLast: index == progressSteps(for: order).count - 1
+                                )
+                            }
+                        }
+                        .padding(20)
+                        .background(
+                            RoundedRectangle(cornerRadius: 28, style: .continuous)
+                                .fill(Color.white)
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 28, style: .continuous)
+                                        .stroke(FigmaPalette.softPink.opacity(0.75), lineWidth: 1.2)
+                                )
+                                .shadow(color: FigmaPalette.softPink.opacity(0.45), radius: 12, x: 0, y: 6)
+                        )
+
+                        SoftActionButton(title: "返回首頁", isEnabled: true) {
+                            appModel.dismissTracking()
+                        }
                     }
                     .padding(.horizontal, 32)
                     .padding(.bottom, 26)
@@ -4137,22 +4305,22 @@ private struct OrderTrackingScreen: View {
 
         return [
             TrackingStep(
-                title: "✓ 系統接收到訂單 \(timeText(from: order.createdAt))",
+                title: "系統接收到訂單 · \(timeText(from: order.createdAt))",
                 subtitle: "你的訂單已確認",
                 isCompleted: true
             ),
             TrackingStep(
-                title: "✓ 花束準備中 \(timeText(from: preparingDate))",
+                title: "花束準備中 · \(timeText(from: preparingDate))",
                 subtitle: "花藝師正在製作你的花束",
                 isCompleted: true
             ),
             TrackingStep(
-                title: "✓ 可到店取貨 \(timeText(from: readyDate))",
+                title: "可到店取貨 · \(timeText(from: readyDate))",
                 subtitle: "你可以到店取花，取單號碼\(order.sourceOrderId.replacingOccurrences(of: "#", with: ""))",
                 isCompleted: true
             ),
             TrackingStep(
-                title: "○ 已取貨",
+                title: "已取貨",
                 subtitle: "預計取貨時間：\(order.pickupWindowText)",
                 isCompleted: false
             )
@@ -4170,12 +4338,357 @@ private struct OrderTrackingScreen: View {
         formatter.dateFormat = "yyyy年M月d日 HH:mm"
         return formatter.string(from: date)
     }
+
+    private func dateText(from date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "M月d日"
+        return formatter.string(from: date)
+    }
+}
+
+private struct OrderTrackingSummaryCard: View {
+    let order: StorefrontTrackingOrder
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            HStack(alignment: .top, spacing: 16) {
+                RoundedRectangle(cornerRadius: 26, style: .continuous)
+                    .fill(Color.white)
+                    .frame(width: 116, height: 116)
+                    .overlay {
+                        RemoteAssetImage(
+                            urlString: order.primaryItem?.imageURL ?? "",
+                            fallbackSystemName: "gift.fill",
+                            contentMode: .fit
+                        )
+                        .padding(14)
+                    }
+
+                VStack(alignment: .leading, spacing: 8) {
+                    OrderStatusBadge(statusText: "待取貨")
+
+                    Text(order.title)
+                        .font(.system(size: 22, weight: .bold))
+                        .foregroundColor(.black)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    Text("付款方式 · \(order.paymentMethod.rawValue)")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundColor(.black.opacity(0.7))
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    Text("總額 HKD \(Int(order.totalPrice.rounded()))")
+                        .font(.system(size: 18, weight: .bold))
+                        .foregroundColor(.black)
+                }
+
+                Spacer(minLength: 0)
+            }
+
+            if !order.items.isEmpty {
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("訂單內容")
+                        .font(.system(size: 14, weight: .bold))
+                    ForEach(order.items) { item in
+                        HStack(alignment: .top, spacing: 8) {
+                            Text(item.name)
+                                .font(.system(size: 14, weight: .medium))
+                                .foregroundColor(.black)
+                                .fixedSize(horizontal: false, vertical: true)
+                            Spacer(minLength: 8)
+                            Text("x\(item.quantity)")
+                                .font(.system(size: 14, weight: .bold))
+                                .foregroundColor(.black.opacity(0.7))
+                        }
+                    }
+                }
+                .padding(.top, 4)
+            }
+        }
+        .padding(20)
+        .background(
+            RoundedRectangle(cornerRadius: 30, style: .continuous)
+                .fill(FigmaPalette.softPink)
+        )
+    }
+}
+
+private struct TrackingMetaCard: View {
+    let iconName: String
+    let title: String
+    let value: String
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 12) {
+            Image(systemName: iconName)
+                .font(.system(size: 15, weight: .bold))
+                .foregroundColor(FigmaPalette.hotPink)
+                .frame(width: 22, height: 22)
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text(title)
+                    .font(.system(size: 13, weight: .bold))
+                    .foregroundColor(.secondary)
+                Text(value)
+                    .font(.system(size: 15, weight: .bold))
+                    .foregroundColor(.black)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            Spacer(minLength: 0)
+        }
+        .padding(16)
+        .background(
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .fill(Color.white)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 20, style: .continuous)
+                        .stroke(FigmaPalette.softPink.opacity(0.75), lineWidth: 1)
+                )
+        )
+    }
+}
+
+private struct OrderTimelineStepView: View {
+    let step: TrackingStep
+    let isLast: Bool
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 14) {
+            VStack(spacing: 0) {
+                ZStack {
+                    Circle()
+                        .fill(step.isCompleted ? FigmaPalette.softPink : Color.white)
+                        .frame(width: 28, height: 28)
+                    Image(systemName: step.isCompleted ? "checkmark" : "clock")
+                        .font(.system(size: 12, weight: .bold))
+                        .foregroundColor(step.isCompleted ? FigmaPalette.hotPink : .gray)
+                }
+
+                if !isLast {
+                    Rectangle()
+                        .fill(step.isCompleted ? FigmaPalette.softPink : Color.gray.opacity(0.25))
+                        .frame(width: 2, height: 44)
+                        .padding(.top, 6)
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text(step.title)
+                    .font(.system(size: 16, weight: .bold))
+                    .foregroundColor(.black)
+                    .fixedSize(horizontal: false, vertical: true)
+                Text(step.subtitle)
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundColor(.black.opacity(0.7))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            Spacer(minLength: 0)
+        }
+    }
 }
 
 private struct TrackingStep {
     let title: String
     let subtitle: String
     let isCompleted: Bool
+}
+
+private struct OrderHistoryScreen: View {
+    @ObservedObject var appModel: FigmaCustomerAppModel
+
+    var body: some View {
+        MainScreenContainer(selectedTab: .profile, appModel: appModel) {
+            ScrollView(showsIndicators: false) {
+                VStack(alignment: .leading, spacing: 22) {
+                    HStack(alignment: .top) {
+                        Button(action: appModel.closeOverlay) {
+                            Image(systemName: "chevron.left")
+                                .font(.system(size: 20, weight: .semibold))
+                                .foregroundColor(FigmaPalette.palePink)
+                                .frame(width: 28, height: 28)
+                        }
+                        .buttonStyle(.plain)
+
+                        Spacer()
+
+                        Text("蔚蘭園")
+                            .font(.system(size: 14, weight: .regular))
+
+                        Spacer()
+                    }
+                    .padding(.top, 16)
+
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("歷史訂單")
+                            .font(.system(size: 29, weight: .bold))
+
+                        Text("查看這位用戶的所有歷史訂單與目前狀態。")
+                            .font(.system(size: 14, weight: .regular))
+                            .foregroundColor(.secondary)
+                    }
+
+                    if appModel.isLoadingUserOrders && appModel.userOrders.isEmpty {
+                        VStack(spacing: 14) {
+                            ProgressView()
+                            Text("正在載入你的歷史訂單...")
+                                .font(.system(size: 14, weight: .medium))
+                                .foregroundColor(.secondary)
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 36)
+                    } else if let errorMessage = appModel.userOrdersErrorMessage,
+                              appModel.userOrders.isEmpty {
+                        VStack(alignment: .leading, spacing: 12) {
+                            Text("訂單暫時載入失敗")
+                                .font(.system(size: 18, weight: .bold))
+                            Text(errorMessage)
+                                .font(.system(size: 14, weight: .regular))
+                                .foregroundColor(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                            SoftActionButton(title: "重新整理", isEnabled: true) {
+                                appModel.openOrderHistory()
+                            }
+                        }
+                        .padding(22)
+                        .background(
+                            RoundedRectangle(cornerRadius: 24, style: .continuous)
+                                .fill(FigmaPalette.softPink.opacity(0.24))
+                        )
+                    } else if appModel.userOrders.isEmpty {
+                        VStack(alignment: .leading, spacing: 12) {
+                            Text("暫時未有歷史訂單")
+                                .font(.system(size: 18, weight: .bold))
+                            Text("完成下單後，這裡會顯示所有訂單與對應狀態。")
+                                .font(.system(size: 14, weight: .regular))
+                                .foregroundColor(.secondary)
+                        }
+                        .padding(22)
+                        .background(
+                            RoundedRectangle(cornerRadius: 24, style: .continuous)
+                                .fill(FigmaPalette.softPink.opacity(0.24))
+                        )
+                    } else {
+                        Text("共 \(appModel.userOrders.count) 筆訂單")
+                            .font(.system(size: 13, weight: .bold))
+                            .foregroundColor(.secondary)
+
+                        ForEach(Array(appModel.userOrders.enumerated()), id: \.offset) { _, order in
+                            OrderHistoryCard(order: order)
+                        }
+                    }
+                }
+                .padding(.horizontal, 32)
+                .padding(.bottom, 26)
+                .frame(maxWidth: 402)
+                .frame(maxWidth: .infinity)
+            }
+        }
+    }
+}
+
+private struct OrderHistoryCard: View {
+    let order: OrderData
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(alignment: .top, spacing: 12) {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(order.bouquetData.name)
+                        .font(.system(size: 20, weight: .bold))
+                        .foregroundColor(.black)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    Text(order.sourceOrderId ?? "未有訂單號碼")
+                        .font(.system(size: 13, weight: .bold))
+                        .foregroundColor(.secondary)
+                }
+
+                Spacer(minLength: 8)
+
+                OrderStatusBadge(statusText: order.status)
+            }
+
+            VStack(alignment: .leading, spacing: 10) {
+                OrderHistoryInfoRow(title: "下單時間", value: dateTimeText(from: order.createdAt))
+                OrderHistoryInfoRow(title: "送貨日期", value: dateTimeText(from: order.deliveryDate))
+                OrderHistoryInfoRow(title: "收貨資料", value: "\(order.customerName) · \(order.customerPhone)")
+                OrderHistoryInfoRow(title: "地址", value: order.deliveryAddress)
+                OrderHistoryInfoRow(title: "總額", value: "HKD \(Int(order.bouquetData.totalPrice.rounded()))")
+            }
+
+            if !order.bouquetData.items.isEmpty {
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("花禮內容")
+                        .font(.system(size: 14, weight: .bold))
+
+                    ForEach(Array(order.bouquetData.items.prefix(4).enumerated()), id: \.offset) { _, item in
+                        HStack(alignment: .top, spacing: 8) {
+                            Text("\(item.flowerEmoji) \(item.flowerName)")
+                                .font(.system(size: 14, weight: .medium))
+                                .foregroundColor(.black)
+                                .fixedSize(horizontal: false, vertical: true)
+                            Spacer(minLength: 8)
+                            Text("x\(item.quantity)")
+                                .font(.system(size: 14, weight: .bold))
+                                .foregroundColor(.black.opacity(0.7))
+                        }
+                    }
+
+                    if order.bouquetData.items.count > 4 {
+                        Text("另有 \(order.bouquetData.items.count - 4) 項花材")
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundColor(.secondary)
+                    }
+                }
+            }
+
+            if !order.specialRequests.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("備註")
+                        .font(.system(size: 13, weight: .bold))
+                    Text(order.specialRequests)
+                        .font(.system(size: 14, weight: .regular))
+                        .foregroundColor(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }
+        .padding(20)
+        .background(
+            RoundedRectangle(cornerRadius: 26, style: .continuous)
+                .fill(Color.white)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 26, style: .continuous)
+                        .stroke(FigmaPalette.softPink.opacity(0.8), lineWidth: 1)
+                )
+                .shadow(color: FigmaPalette.softPink.opacity(0.35), radius: 10, x: 0, y: 5)
+        )
+    }
+
+    private func dateTimeText(from date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy年M月d日 HH:mm"
+        return formatter.string(from: date)
+    }
+}
+
+private struct OrderHistoryInfoRow: View {
+    let title: String
+    let value: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title)
+                .font(.system(size: 12, weight: .bold))
+                .foregroundColor(.secondary)
+            Text(value)
+                .font(.system(size: 14, weight: .medium))
+                .foregroundColor(.black)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
 }
 
 private struct ProfileScreen: View {
@@ -4197,6 +4710,14 @@ private struct ProfileScreen: View {
                             .font(.system(size: 14, weight: .regular))
 
                         Spacer()
+
+                        Button(action: appModel.openProfileEditor) {
+                            Image(systemName: "square.and.pencil")
+                                .font(.system(size: 19, weight: .semibold))
+                                .foregroundColor(.black)
+                                .frame(width: 28, height: 28)
+                        }
+                        .buttonStyle(.plain)
                     }
                     .padding(.top, 16)
 
@@ -4243,59 +4764,262 @@ private struct ProfileScreen: View {
                     }
                     .frame(maxWidth: .infinity)
 
-                    VStack(alignment: .leading, spacing: 20) {
-                        ProfileInfoRow(title: "電郵", value: appModel.profileEmailText)
-                        ProfileInfoRow(title: "電話號碼", value: appModel.profilePhoneText)
+                    VStack(alignment: .leading, spacing: 16) {
+                        ProfileInfoRow(title: "名稱", value: appModel.profileDisplayName, action: appModel.openProfileEditor)
+                        ProfileInfoRow(title: "電郵", value: appModel.profileEmailText, action: appModel.openProfileEditor)
+                        ProfileInfoRow(title: "電話號碼", value: appModel.profilePhoneText, action: appModel.openProfileEditor)
 
-                        VStack(alignment: .leading, spacing: 12) {
-                            Text("我的訂單")
-                                .font(.system(size: 14, weight: .bold))
-
-                            ProfileDetailLine(icon: "📦", title: "訂單紀錄", subtitle: "查看過往訂單並可再次購買")
-                            ProfileDetailLine(icon: "📍", title: "送貨地址", subtitle: "管理已儲存的地址")
+                        if appModel.isLoadingProfile {
+                            Text("正在同步你的個人資料...")
+                                .font(.system(size: 12, weight: .medium))
+                                .foregroundColor(.secondary)
+                        } else if let profileError = appModel.profileSaveErrorMessage,
+                                  appModel.profileRecord == nil {
+                            Text(profileError)
+                                .font(.system(size: 12, weight: .medium))
+                                .foregroundColor(.red)
                         }
+                    }
 
-                        VStack(alignment: .leading, spacing: 12) {
-                            Text("🔔 通知")
-                                .font(.system(size: 14, weight: .bold))
-                            Text("🙋幫助與支援")
-                                .font(.system(size: 14, weight: .bold))
-                            ProfileDetailLine(icon: "💬", title: "聯絡店舖", subtitle: nil)
-                            ProfileDetailLine(icon: "❓", title: "常見問題", subtitle: "關於訂單與送貨的常見問題。")
-                        }
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text("我的訂單")
+                            .font(.system(size: 14, weight: .bold))
 
-                        Button {
-                            appModel.logout()
-                        } label: {
-                            HStack(spacing: 8) {
-                                Image(systemName: "rectangle.portrait.and.arrow.right")
-                                    .font(.system(size: 15, weight: .bold))
-
-                                Text("登出帳戶")
-                                    .font(.system(size: 14, weight: .bold))
-                            }
-                            .foregroundColor(FigmaPalette.hotPink)
-                            .frame(maxWidth: .infinity)
-                            .frame(height: 46)
-                            .background(
-                                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                                    .fill(Color.white)
+                        Button(action: appModel.openOrderHistory) {
+                            ProfileDetailLine(
+                                icon: "📦",
+                                title: "訂單紀錄",
+                                subtitle: orderSubtitle,
+                                showsChevron: true
                             )
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                                    .stroke(FigmaPalette.hotPink.opacity(0.35), lineWidth: 1)
-                            )
-                            .shadow(color: FigmaPalette.softPink.opacity(0.45), radius: 8, x: 0, y: 4)
                         }
                         .buttonStyle(.plain)
-                        .padding(.top, 4)
+
+                        ProfileDetailLine(
+                            icon: "📍",
+                            title: "送貨地址",
+                            subtitle: "管理已儲存的地址",
+                            showsChevron: false
+                        )
                     }
+
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text("🔔 通知")
+                            .font(.system(size: 14, weight: .bold))
+                        Text("🙋幫助與支援")
+                            .font(.system(size: 14, weight: .bold))
+                        ProfileDetailLine(icon: "💬", title: "聯絡店舖", subtitle: nil, showsChevron: false)
+                        ProfileDetailLine(
+                            icon: "❓",
+                            title: "常見問題",
+                            subtitle: "關於訂單與送貨的常見問題。",
+                            showsChevron: false
+                        )
+                    }
+
+                    Button {
+                        appModel.logout()
+                    } label: {
+                        HStack(spacing: 8) {
+                            Image(systemName: "rectangle.portrait.and.arrow.right")
+                                .font(.system(size: 15, weight: .bold))
+
+                            Text("登出帳戶")
+                                .font(.system(size: 14, weight: .bold))
+                        }
+                        .foregroundColor(FigmaPalette.hotPink)
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 46)
+                        .background(
+                            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                .fill(Color.white)
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                .stroke(FigmaPalette.hotPink.opacity(0.35), lineWidth: 1)
+                        )
+                        .shadow(color: FigmaPalette.softPink.opacity(0.45), radius: 8, x: 0, y: 4)
+                    }
+                    .buttonStyle(.plain)
+                    .padding(.top, 4)
                 }
                 .padding(.horizontal, 32)
                 .padding(.bottom, 26)
                 .frame(maxWidth: 402)
                 .frame(maxWidth: .infinity)
             }
+        }
+    }
+
+    private var orderSubtitle: String {
+        if appModel.isLoadingUserOrders {
+            return "正在載入你的訂單..."
+        }
+
+        if let errorMessage = appModel.userOrdersErrorMessage,
+           appModel.userOrders.isEmpty {
+            return errorMessage
+        }
+
+        if appModel.userOrders.isEmpty {
+            return "查看過往訂單與目前狀態"
+        }
+
+        return "共 \(appModel.userOrders.count) 筆訂單，查看全部狀態"
+    }
+}
+
+private struct ProfileEditScreen: View {
+    @ObservedObject var appModel: FigmaCustomerAppModel
+
+    var body: some View {
+        MainScreenContainer(selectedTab: .profile, appModel: appModel) {
+            ScrollView(showsIndicators: false) {
+                VStack(alignment: .leading, spacing: 22) {
+                    HStack(alignment: .top) {
+                        Button(action: appModel.closeOverlay) {
+                            Image(systemName: "chevron.left")
+                                .font(.system(size: 20, weight: .semibold))
+                                .foregroundColor(FigmaPalette.palePink)
+                                .frame(width: 28, height: 28)
+                        }
+                        .buttonStyle(.plain)
+
+                        Spacer()
+
+                        Text("蔚蘭園")
+                            .font(.system(size: 14, weight: .regular))
+
+                        Spacer()
+                    }
+                    .padding(.top, 16)
+
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("編輯資料")
+                            .font(.system(size: 29, weight: .bold))
+
+                        Text("修改後會同步到個人頁面，後續下單也會優先使用這些聯絡資料。")
+                            .font(.system(size: 14, weight: .regular))
+                            .foregroundColor(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+
+                    VStack(alignment: .leading, spacing: 16) {
+                        ProfileEditorField(
+                            title: "名稱",
+                            placeholder: "例如：陳小美",
+                            text: $appModel.profileDraftName
+                        )
+
+                        ProfileEditorField(
+                            title: "聯絡電郵",
+                            placeholder: "name@example.com",
+                            text: $appModel.profileDraftEmail,
+                            keyboardType: .emailAddress
+                        )
+
+                        ProfileEditorField(
+                            title: "電話號碼",
+                            placeholder: "+852 9123 4567",
+                            text: $appModel.profileDraftPhone,
+                            keyboardType: .phonePad
+                        )
+                    }
+                    .padding(20)
+                    .background(
+                        RoundedRectangle(cornerRadius: 26, style: .continuous)
+                            .fill(Color.white)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 26, style: .continuous)
+                                    .stroke(FigmaPalette.softPink.opacity(0.75), lineWidth: 1)
+                            )
+                    )
+
+                    if let errorMessage = appModel.profileSaveErrorMessage {
+                        Text(errorMessage)
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundColor(.red)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+
+                    SoftActionButton(
+                        title: appModel.isSavingProfile ? "儲存中..." : "儲存修改",
+                        isEnabled: appModel.canSaveProfileChanges,
+                        action: appModel.saveProfileChanges
+                    )
+                }
+                .padding(.horizontal, 32)
+                .padding(.bottom, 26)
+                .frame(maxWidth: 402)
+                .frame(maxWidth: .infinity)
+            }
+        }
+    }
+}
+
+private struct ProfileEditorField: View {
+    let title: String
+    let placeholder: String
+    @Binding var text: String
+    var keyboardType: UIKeyboardType = .default
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(title)
+                .font(.system(size: 13, weight: .bold))
+
+            TextField(placeholder, text: $text)
+                .keyboardType(keyboardType)
+                .textInputAutocapitalization(keyboardType == .emailAddress ? .never : .words)
+                .autocorrectionDisabled(keyboardType == .emailAddress)
+                .padding(.horizontal, 16)
+                .frame(height: 46)
+                .background(
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .fill(FigmaPalette.softPink.opacity(0.24))
+                )
+        }
+    }
+}
+
+private struct OrderStatusBadge: View {
+    let statusText: String
+
+    var body: some View {
+        Text(statusText)
+            .font(.system(size: 12, weight: .bold))
+            .foregroundColor(foregroundColor)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 7)
+            .background(
+                Capsule(style: .continuous)
+                    .fill(backgroundColor)
+            )
+    }
+
+    private var foregroundColor: Color {
+        switch statusText {
+        case OrderStatus.pending.rawValue, "待取貨":
+            return Color(red: 0.70, green: 0.34, blue: 0.51)
+        case OrderStatus.confirmed.rawValue, OrderStatus.preparing.rawValue:
+            return Color(red: 0.14, green: 0.40, blue: 0.31)
+        case OrderStatus.ready.rawValue, OrderStatus.delivered.rawValue:
+            return Color(red: 0.13, green: 0.31, blue: 0.67)
+        default:
+            return .black
+        }
+    }
+
+    private var backgroundColor: Color {
+        switch statusText {
+        case OrderStatus.pending.rawValue, "待取貨":
+            return FigmaPalette.softPink.opacity(0.8)
+        case OrderStatus.confirmed.rawValue, OrderStatus.preparing.rawValue:
+            return Color(red: 0.86, green: 0.96, blue: 0.90)
+        case OrderStatus.ready.rawValue, OrderStatus.delivered.rawValue:
+            return Color(red: 0.87, green: 0.92, blue: 1.0)
+        default:
+            return Color.gray.opacity(0.15)
         }
     }
 }
@@ -6631,18 +7355,45 @@ private struct QuantityControl: View {
 private struct ProfileInfoRow: View {
     let title: String
     let value: String
+    var action: (() -> Void)? = nil
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
+        Group {
+            if let action {
+                Button(action: action) {
+                    rowContent
+                }
+                .buttonStyle(.plain)
+            } else {
+                rowContent
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 14)
+        .background(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .fill(Color.white)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 18, style: .continuous)
+                        .stroke(FigmaPalette.softPink.opacity(0.8), lineWidth: 1)
+                )
+        )
+    }
+
+    private var rowContent: some View {
+        VStack(alignment: .leading, spacing: 6) {
             Text(title)
                 .font(.system(size: 13, weight: .bold))
-            HStack {
+            HStack(alignment: .top, spacing: 10) {
                 Text(value)
                     .font(.system(size: 13, weight: .regular))
-                Spacer()
+                    .foregroundColor(.black)
+                    .fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 0)
                 Image(systemName: "pencil")
                     .font(.system(size: 14, weight: .bold))
                     .foregroundColor(FigmaPalette.hotPink)
+                    .padding(.top, 1)
             }
         }
     }
@@ -6652,16 +7403,40 @@ private struct ProfileDetailLine: View {
     let icon: String
     let title: String
     let subtitle: String?
+    var showsChevron = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text("\(icon) \(title)")
-                .font(.system(size: 12, weight: .bold))
-            if let subtitle {
-                Text(subtitle)
-                    .font(.system(size: 12, weight: .regular))
+        HStack(alignment: .top, spacing: 12) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("\(icon) \(title)")
+                    .font(.system(size: 12, weight: .bold))
+                if let subtitle {
+                    Text(subtitle)
+                        .font(.system(size: 12, weight: .regular))
+                        .foregroundColor(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+
+            Spacer(minLength: 0)
+
+            if showsChevron {
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 12, weight: .bold))
+                    .foregroundColor(.secondary)
+                    .padding(.top, 2)
             }
         }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 14)
+        .background(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .fill(Color.white)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 18, style: .continuous)
+                        .stroke(FigmaPalette.softPink.opacity(0.8), lineWidth: 1)
+                )
+        )
     }
 }
 
