@@ -3114,14 +3114,68 @@ private struct MaterialsPane: View {
             }
         }
         .frame(maxWidth: 402, maxHeight: .infinity)
+        .safeAreaInset(edge: .bottom, spacing: 10) {
+            BrowseCartQuickBar(appModel: appModel)
+                .padding(.horizontal, 14)
+                .padding(.top, 4)
+                .background(Color.white)
+        }
+    }
+}
+
+private struct BrowseCartQuickBar: View {
+    @ObservedObject var appModel: FigmaCustomerAppModel
+
+    private var totalQuantity: Int {
+        appModel.cartItems.reduce(0) { $0 + $1.quantity }
+    }
+
+    var body: some View {
+        HStack(spacing: 12) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(totalQuantity > 0 ? "已選 \(totalQuantity) 件" : "尚未選花")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundColor(.secondary)
+
+                Text(appModel.cartTotalPriceText)
+                    .font(.system(size: 22, weight: .bold))
+                    .foregroundColor(.black)
+            }
+
+            Spacer()
+
+            Button {
+                appModel.proceedToCart()
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "cart.fill")
+                        .font(.system(size: 15, weight: .bold))
+                    Text("前往購物車")
+                        .font(.system(size: 14, weight: .bold))
+                }
+                .foregroundColor(.white)
+                .padding(.horizontal, 18)
+                .frame(height: 44)
+                .background(
+                    Capsule(style: .continuous)
+                        .fill(Color.black)
+                )
+            }
+            .buttonStyle(.plain)
+            .opacity(appModel.cartItems.isEmpty ? 0.45 : 1)
+            .disabled(appModel.cartItems.isEmpty)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
+        .background(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .fill(FigmaPalette.softPink.opacity(0.75))
+        )
     }
 }
 
 private struct ClassicBouquetsPane: View {
     @ObservedObject var appModel: FigmaCustomerAppModel
-    @State private var selectedChip = "玫瑰"
-
-    private let bouquetFilters = ["玫瑰", "粉色", "浪漫"]
     private let columns = [
         GridItem(.flexible(), spacing: 18),
         GridItem(.flexible(), spacing: 18)
@@ -3130,24 +3184,6 @@ private struct ClassicBouquetsPane: View {
     var body: some View {
         ScrollView(showsIndicators: false) {
             VStack(alignment: .leading, spacing: 18) {
-                HStack(spacing: 8) {
-                    FilterChip(title: "篩選", filled: true, symbol: "line.3.horizontal.decrease")
-
-                    ForEach(bouquetFilters, id: \.self) { title in
-                        Button {
-                            selectedChip = title
-                        } label: {
-                            FilterChip(title: title, filled: false, symbol: nil)
-                                .overlay(
-                                    RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                        .stroke(selectedChip == title ? Color.black : Color.clear, lineWidth: 1.2)
-                                )
-                        }
-                        .buttonStyle(.plain)
-                    }
-                }
-                .padding(.horizontal, 20)
-
                 if appModel.availableBouquetProducts.isEmpty {
                     Text("Firestore 的 bouquets 暂时没有可展示的经典花束。")
                         .font(.system(size: 13, weight: .medium))
@@ -5292,40 +5328,6 @@ private struct PromoCard: View {
             }
         }
         .buttonStyle(.plain)
-    }
-}
-
-private struct FilterChip: View {
-    let title: String
-    let filled: Bool
-    let symbol: String?
-
-    var body: some View {
-        HStack(spacing: 6) {
-            if let symbol {
-                Image(systemName: symbol)
-                    .font(.system(size: 12, weight: .semibold))
-            }
-
-            Text(title)
-                .font(.system(size: 14, weight: filled ? .bold : .semibold))
-
-            if !filled {
-                Image(systemName: "xmark")
-                    .font(.system(size: 10, weight: .bold))
-            }
-        }
-        .padding(.horizontal, 10)
-        .frame(height: 38)
-        .background(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(filled ? Color.black : Color.white)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .stroke(Color.black, lineWidth: filled ? 0 : 1)
-        )
-        .foregroundColor(filled ? .white : .black)
     }
 }
 
