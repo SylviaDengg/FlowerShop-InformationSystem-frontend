@@ -5555,22 +5555,23 @@ private struct MainScreenContainer<Content: View>: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color.clear)
         .safeAreaInset(edge: .bottom, spacing: 0) {
-            ZStack(alignment: .top) {
-                Color.white
+            VStack(spacing: 0) {
+                Rectangle()
+                    .fill(Color.black.opacity(0.08))
+                    .frame(height: 1)
 
-                VStack(spacing: 0) {
-                    Rectangle()
-                        .fill(Color.black.opacity(0.08))
-                        .frame(height: 1)
-
-                    FigmaBottomNavBar(selectedTab: selectedTab) { tab in
-                        appModel.selectTab(tab)
-                    }
-                    .padding(.top, 10)
+                FigmaBottomNavBar(selectedTab: selectedTab) { tab in
+                    appModel.selectTab(tab)
                 }
+                .padding(.top, 10)
+                .padding(.bottom, 8)
             }
             .frame(maxWidth: .infinity)
-            .frame(height: 108)
+            .background(
+                Color.white
+                    .ignoresSafeArea(edges: .bottom)
+                    .shadow(color: Color.black.opacity(0.06), radius: 8, x: 0, y: -2)
+            )
         }
         .coordinateSpace(name: BottomNavButtonFrameReader.coordinateSpaceName)
         .onPreferenceChange(BottomNavButtonFramePreferenceKey.self) { frames in
@@ -6227,30 +6228,24 @@ private struct AssistantSummaryBubble: View {
             VStack(alignment: .leading, spacing: 14) {
                 if let recommendedOfferingName = recommendation.recommendedOfferingName,
                    !recommendedOfferingName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    Text("• 花束：\(Text(recommendedOfferingName).fontWeight(.bold))")
-                        .font(.system(size: 13, weight: .regular))
-                        .foregroundColor(.black.opacity(0.75))
-                        .fixedSize(horizontal: false, vertical: true)
+                    recommendationLine(title: "花束", value: recommendedOfferingName)
                 }
 
                 if !recommendation.recommendedFlowers.isEmpty {
-                    Text("• 花材：\(Text(recommendation.recommendedFlowers.joined(separator: "、")).fontWeight(.bold))")
-                        .font(.system(size: 13, weight: .regular))
-                        .foregroundColor(.black.opacity(0.75))
-                        .fixedSize(horizontal: false, vertical: true)
+                    recommendationLine(
+                        title: "花材",
+                        value: recommendation.recommendedFlowers.joined(separator: "、")
+                    )
                 }
 
                 ForEach(Array(recommendation.diySuggestions.enumerated()), id: \.offset) { _, suggestion in
-                    Text("• 自訂可選 \(Text(suggestion.categoryName).fontWeight(.bold)) 類的 \(Text(suggestion.flowerName).fontWeight(.bold)) \(suggestion.quantityText)")
-                        .font(.system(size: 13, weight: .regular))
-                        .foregroundColor(.black.opacity(0.75))
-                        .fixedSize(horizontal: false, vertical: true)
+                    recommendationLine(
+                        title: "自訂可選",
+                        value: "\(suggestion.categoryName) 類的 \(suggestion.flowerName) \(suggestion.quantityText)"
+                    )
                 }
 
-                Text("• 預算參考：\(recommendation.estimatedPriceText)")
-                    .font(.system(size: 13, weight: .regular))
-                    .foregroundColor(.black.opacity(0.75))
-                    .fixedSize(horizontal: false, vertical: true)
+                recommendationLine(title: "預算參考", value: recommendation.estimatedPriceText)
             }
 
             Text(recommendation.nextStepHint)
@@ -6266,25 +6261,64 @@ private struct AssistantSummaryBubble: View {
                 paragraphView(for: lines[index])
             }
         }
+        .font(.system(size: 13, weight: .regular))
     }
 
+    @ViewBuilder
     private func paragraphView(for paragraph: String) -> some View {
-        Group {
-            if let attributed = try? AttributedString(
-                markdown: paragraph,
-                options: AttributedString.MarkdownParsingOptions(
-                    interpretedSyntax: .inlineOnlyPreservingWhitespace
-                )
-            ) {
-                Text(attributed)
-                    .font(.system(size: 13))
-            } else {
-                Text(paragraph)
-                    .font(.system(size: 13, weight: .regular))
+        let trimmed = paragraph.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if let heading = markdownHeading(from: trimmed) {
+            Text(heading.text)
+                .font(.system(size: headingFontSize(for: heading.level), weight: .bold))
+                .foregroundColor(.black.opacity(0.86))
+                .fixedSize(horizontal: false, vertical: true)
+        } else {
+            Group {
+                if let attributed = try? AttributedString(
+                    markdown: paragraph,
+                    options: AttributedString.MarkdownParsingOptions(
+                        interpretedSyntax: .full
+                    )
+                ) {
+                    Text(attributed)
+                } else {
+                    Text(paragraph)
+                }
+            }
+            .foregroundColor(.black.opacity(0.75))
+            .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private func recommendationLine(title: String, value: String) -> some View {
+        Text("• \(title)：\(Text(value).font(.system(size: 13, weight: .regular)))")
+            .font(.system(size: 13, weight: .bold))
+            .foregroundColor(.black.opacity(0.75))
+            .fixedSize(horizontal: false, vertical: true)
+    }
+
+    private func markdownHeading(from text: String) -> (level: Int, text: String)? {
+        for level in 1...6 {
+            let prefix = String(repeating: "#", count: level) + " "
+            if text.hasPrefix(prefix) {
+                return (level, String(text.dropFirst(prefix.count)))
             }
         }
-        .foregroundColor(.black.opacity(0.75))
-        .fixedSize(horizontal: false, vertical: true)
+        return nil
+    }
+
+    private func headingFontSize(for level: Int) -> CGFloat {
+        switch level {
+        case 1:
+            return 18
+        case 2:
+            return 16
+        case 3:
+            return 15
+        default:
+            return 14
+        }
     }
 }
 
@@ -8161,7 +8195,7 @@ private struct FigmaBottomNavBar: View {
         .padding(.top, 8)
         .frame(maxWidth: 402)
         .frame(maxWidth: .infinity)
-        .background(Color.clear)
+        .background(Color.white)
     }
 
     private var leadingGroups: [[FigmaCustomerAppModel.MainTab]] {
