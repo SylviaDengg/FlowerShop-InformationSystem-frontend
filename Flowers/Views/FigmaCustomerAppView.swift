@@ -223,6 +223,8 @@ final class FigmaCustomerAppModel: ObservableObject {
     @Published var modelName = ProcessInfo.processInfo.environment["ARK_IMAGE_MODEL"] ?? "doubao-seedream-5-0-250428"
     @Published var assistantAPIKey = ProcessInfo.processInfo.environment["ARK_API_KEY"] ?? ""
     @Published var assistantModelName = ProcessInfo.processInfo.environment["ARK_CHAT_MODEL"] ?? "doubao-seed-2-0-mini-260215"
+    @Published var assistantReasoningEffort = ProcessInfo.processInfo.environment["ARK_CHAT_REASONING_EFFORT"] ?? "minimal"
+    @Published var assistantThinkingType = ProcessInfo.processInfo.environment["ARK_CHAT_THINKING_TYPE"] ?? "disabled"
     @Published var assistantConversationStep = 1
     @Published var assistantErrorMessage: String?
     @Published var assistantRecommendation: StorefrontAssistantRecommendation?
@@ -1119,7 +1121,9 @@ final class FigmaCustomerAppModel: ObservableObject {
                 ],
                 context: buildAssistantContext(),
                 apiKey: assistantAPIKey,
-                modelName: assistantModelName
+                modelName: assistantModelName,
+                thinkingType: assistantThinkingType,
+                reasoningEffort: assistantReasoningEffort
             )
             guard activeAssistantRecommendationRequestID == requestID else { return }
             if let decodedRecommendation = decodeAssistantRecommendation(from: reply) {
@@ -1561,6 +1565,14 @@ final class FigmaCustomerAppModel: ObservableObject {
 
                 if let assistantModelName = config.assistantModelName {
                     self.assistantModelName = assistantModelName
+                }
+
+                if let assistantReasoningEffort = config.assistantReasoningEffort {
+                    self.assistantReasoningEffort = assistantReasoningEffort
+                }
+
+                if let assistantThinkingType = config.assistantThinkingType {
+                    self.assistantThinkingType = assistantThinkingType
                 }
             }
             .store(in: &cancellables)

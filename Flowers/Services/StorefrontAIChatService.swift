@@ -109,7 +109,9 @@ struct StorefrontAIChatService {
         history: [StorefrontAssistantMessage],
         context: StorefrontAssistantContext,
         apiKey: String,
-        modelName: String
+        modelName: String,
+        thinkingType: String? = nil,
+        reasoningEffort: String? = nil
     ) async throws -> String {
         let cleanedKey = sanitizeAPIKey(apiKey)
         guard !cleanedKey.isEmpty else {
@@ -120,9 +122,14 @@ struct StorefrontAIChatService {
             throw StorefrontAIChatError.invalidAPIKeyFormat
         }
 
+        let normalizedThinkingType = normalizeThinkingType(thinkingType)
+        let normalizedReasoningEffort = normalizeReasoningEffort(reasoningEffort)
+
         let requestBody = ArkChatCompletionRequest(
             model: modelName,
-            messages: buildMessages(history: history, context: context)
+            messages: buildMessages(history: history, context: context),
+            thinking: normalizedThinkingType.map { ArkChatThinking(type: $0) },
+            reasoningEffort: normalizedReasoningEffort
         )
 
         var request = URLRequest(url: endpoint)
@@ -243,16 +250,55 @@ struct StorefrontAIChatService {
             .joined()
             .trimmingCharacters(in: .whitespacesAndNewlines)
     }
+
+    private func normalizeThinkingType(_ rawValue: String?) -> String? {
+        let normalized = rawValue?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+
+        switch normalized {
+        case "enabled", "disabled", "auto":
+            return normalized
+        default:
+            return nil
+        }
+    }
+
+    private func normalizeReasoningEffort(_ rawValue: String?) -> String? {
+        let normalized = rawValue?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+
+        switch normalized {
+        case "minimal", "low", "medium", "high":
+            return normalized
+        default:
+            return nil
+        }
+    }
 }
 
 private struct ArkChatCompletionRequest: Encodable {
     let model: String
     let messages: [ArkChatMessage]
+    let thinking: ArkChatThinking?
+    let reasoningEffort: String?
+
+    enum CodingKeys: String, CodingKey {
+        case model
+        case messages
+        case thinking
+        case reasoningEffort = "reasoning_effort"
+    }
 }
 
 private struct ArkChatMessage: Encodable {
     let role: String
     let content: String
+}
+
+private struct ArkChatThinking: Encodable {
+    let type: String
 }
 
 private struct ArkChatCompletionResponse: Decodable {

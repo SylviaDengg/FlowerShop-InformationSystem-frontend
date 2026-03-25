@@ -28,6 +28,8 @@ struct StorefrontPreviewConfiguration: Equatable {
     let modelName: String?
     let assistantApiKey: String?
     let assistantModelName: String?
+    let assistantReasoningEffort: String?
+    let assistantThinkingType: String?
     let isEnabled: Bool
     
     static let documentPath = "settings/ai_preview"
@@ -56,6 +58,16 @@ struct StorefrontPreviewConfiguration: Equatable {
             data["chatModel"],
             data["textModel"],
             data["llmModel"]
+        )
+        self.assistantReasoningEffort = StorefrontPreviewConfiguration.firstNonEmptyString(
+            data["assistantReasoningEffort"],
+            data["chatReasoningEffort"],
+            data["reasoningEffort"]
+        )
+        self.assistantThinkingType = StorefrontPreviewConfiguration.firstNonEmptyString(
+            data["assistantThinkingType"],
+            data["chatThinkingType"],
+            data["thinkingType"]
         )
         self.isEnabled = (data["isEnabled"] as? Bool) ?? true
     }
