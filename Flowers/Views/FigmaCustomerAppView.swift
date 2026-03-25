@@ -573,11 +573,15 @@ final class FigmaCustomerAppModel: ObservableObject {
     }
 
     var diyAssistantSummaryText: String {
-        let trimmedRecommendation = assistantRecommendationText?
+        let sourceSummary = assistantRecommendation?.formattedSummary ?? assistantRecommendationText
+        let trimmedRecommendation = sourceSummary?
             .trimmingCharacters(in: .whitespacesAndNewlines)
 
         if let trimmedRecommendation, !trimmedRecommendation.isEmpty {
-            return trimmedRecommendation
+            let summaryWithoutNextStep = removingNextStepSection(from: trimmedRecommendation)
+            if !summaryWithoutNextStep.isEmpty {
+                return summaryWithoutNextStep
+            }
         }
 
         return suggestedDesignText
@@ -619,6 +623,19 @@ final class FigmaCustomerAppModel: ObservableObject {
         selectedDIYFlowers
             .filter { !$0.flower.hasReferenceImage }
             .map { $0.flower.name }
+    }
+
+    private func removingNextStepSection(from summary: String) -> String {
+        let normalized = summary.replacingOccurrences(of: "\r\n", with: "\n")
+        let markers = ["\n\n### 下一步", "\n\n###下一步", "### 下一步", "###下一步"]
+
+        if let cutoff = markers
+            .compactMap({ marker in normalized.range(of: marker)?.lowerBound })
+            .min() {
+            return String(normalized[..<cutoff]).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+
+        return normalized.trimmingCharacters(in: .whitespacesAndNewlines)
     }
     
     var missingPreviewReferenceMessages: [String] {
