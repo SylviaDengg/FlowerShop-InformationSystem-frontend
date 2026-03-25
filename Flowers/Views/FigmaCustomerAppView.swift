@@ -173,8 +173,20 @@ final class FigmaCustomerAppModel: ObservableObject {
 
     @Published var authState: AuthState = .welcome
     @Published var authEntryMode: AuthEntryMode = .login
-    @Published var activeTab: MainTab = .home
-    @Published var overlayScreen: OverlayScreen?
+    @Published var activeTab: MainTab = .home {
+        didSet {
+            if activeTab != .browse {
+                dismissDIYAssistantGuide()
+            }
+        }
+    }
+    @Published var overlayScreen: OverlayScreen? {
+        didSet {
+            if overlayScreen != .assistantJourney {
+                dismissDIYAssistantGuide()
+            }
+        }
+    }
     @Published var email = ""
     @Published var password = ""
     @Published var selectedProduct = BouquetProduct.defaultSelection
@@ -190,7 +202,13 @@ final class FigmaCustomerAppModel: ObservableObject {
     @Published var availableFlowers: [Flower] = []
     @Published var availableBouquetProducts: [BouquetProduct] = []
     @Published var availableWrappingOptions: [BouquetWrappingOption] = []
-    @Published var assistantFlowStage: AssistantFlowStage = .chat
+    @Published var assistantFlowStage: AssistantFlowStage = .chat {
+        didSet {
+            if assistantFlowStage == .chat {
+                dismissDIYAssistantGuide()
+            }
+        }
+    }
     @Published var selectedDIYFlowerCategory: FlowerCategory = .tulip
     @Published var selectedFlowerQuantities: [String: Int] = [:]
     @Published var selectedWrappingOptionID: String?
@@ -231,6 +249,7 @@ final class FigmaCustomerAppModel: ObservableObject {
     @Published var profileDraftName = ""
     @Published var profileDraftEmail = ""
     @Published var profileDraftPhone = ""
+    @Published private(set) var showDIYAssistantGuide = false
     @Published private var restockReminderTargets: [RestockReminderTarget] = []
     @Published private(set) var unreadRestockReminderKeys: Set<String> = []
     @Published private(set) var notificationMessages: [StorefrontNotificationMessage] = []
@@ -254,6 +273,8 @@ final class FigmaCustomerAppModel: ObservableObject {
     private var hasResolvedInventory = false
     private var hasResolvedRemoteWrappingOptions = false
     private var remoteFlowerCount = 0
+    private var diyAssistantGuideTask: Task<Void, Never>?
+    private var hasTriggeredDIYAssistantGuideThisLaunch = false
 
     init() {
         resetAssistantChat()
@@ -284,6 +305,13 @@ final class FigmaCustomerAppModel: ObservableObject {
 
     var canSubmitAuthForm: Bool {
         canLogin && !isAuthenticating
+    }
+
+    var shouldDisplayDIYAssistantGuide: Bool {
+        showDIYAssistantGuide
+            && activeTab == .browse
+            && overlayScreen == .assistantJourney
+            && assistantFlowStage != .chat
     }
 
     var recommendedBouquet: BouquetProduct {
@@ -862,6 +890,7 @@ final class FigmaCustomerAppModel: ObservableObject {
         }
         proceedToDIYDesigner()
         overlayScreen = .assistantJourney
+        scheduleDIYAssistantGuideIfNeeded()
     }
 
     func openFarm() {
@@ -1224,6 +1253,39 @@ final class FigmaCustomerAppModel: ObservableObject {
 
     func dismissPreviewDisclaimerOverlay() {
         showPreviewDisclaimer = false
+    }
+
+    private func scheduleDIYAssistantGuideIfNeeded() {
+        guard !hasTriggeredDIYAssistantGuideThisLaunch else { return }
+
+        hasTriggeredDIYAssistantGuideThisLaunch = true
+        dismissDIYAssistantGuide()
+
+        diyAssistantGuideTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+
+            guard let self, !Task.isCancelled else { return }
+            guard self.activeTab == .browse,
+                  self.overlayScreen == .assistantJourney,
+                  self.assistantFlowStage != .chat else {
+                return
+            }
+
+            withAnimation(.spring(response: 0.36, dampingFraction: 0.78)) {
+                self.showDIYAssistantGuide = true
+            }
+        }
+    }
+
+    private func dismissDIYAssistantGuide() {
+        diyAssistantGuideTask?.cancel()
+        diyAssistantGuideTask = nil
+
+        guard showDIYAssistantGuide else { return }
+
+        withAnimation(.easeOut(duration: 0.18)) {
+            showDIYAssistantGuide = false
+        }
     }
 
     func returnToConfirmStep() {
@@ -5214,6 +5276,7 @@ private struct MainScreenContainer<Content: View>: View {
     let selectedTab: FigmaCustomerAppModel.MainTab
     @ObservedObject var appModel: FigmaCustomerAppModel
     @ViewBuilder let content: Content
+    @State private var bottomNavFrames: [FigmaCustomerAppModel.MainTab: CGRect] = [:]
 
     init(
         selectedTab: FigmaCustomerAppModel.MainTab,
@@ -5231,6 +5294,16 @@ private struct MainScreenContainer<Content: View>: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color.clear)
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            FigmaBottomNavBar(selectedTab: selectedTab) { tab in
+                appModel.selectTab(tab)
+            }
+            .padding(.bottom, 8)
+        }
+        .coordinateSpace(name: BottomNavButtonFrameReader.coordinateSpaceName)
+        .onPreferenceChange(BottomNavButtonFramePreferenceKey.self) { frames in
+            bottomNavFrames = frames
+        }
         .overlay(alignment: .top) {
             GeometryReader { proxy in
                 Color.white
@@ -5240,11 +5313,11 @@ private struct MainScreenContainer<Content: View>: View {
             }
             .allowsHitTesting(false)
         }
-        .safeAreaInset(edge: .bottom, spacing: 0) {
-            FigmaBottomNavBar(selectedTab: selectedTab) { tab in
-                appModel.selectTab(tab)
+        .overlay(alignment: .topLeading) {
+            if appModel.shouldDisplayDIYAssistantGuide,
+               let assistantFrame = bottomNavFrames[.assistant] {
+                DIYAssistantGuideOverlay(targetFrame: assistantFrame)
             }
-            .padding(.bottom, 8)
         }
     }
 }
@@ -7777,6 +7850,7 @@ private struct BottomNavGroup: View {
                         .frame(width: tab == .browse ? 37 : 32, height: 37)
                 }
                 .buttonStyle(.plain)
+                .captureBottomNavFrame(for: tab)
             }
         }
         .padding(.horizontal, horizontalPadding)
@@ -7817,6 +7891,7 @@ private struct BottomNavSelectedButton: View {
                 .frame(width: 38, height: 38)
         }
         .buttonStyle(.plain)
+        .captureBottomNavFrame(for: tab)
     }
 
     private var selectedFont: Font {
@@ -7831,6 +7906,83 @@ private struct BottomNavSelectedButton: View {
             return .system(size: 28, weight: .regular)
         case .profile:
             return .system(size: 30, weight: .regular)
+        }
+    }
+}
+
+private struct BottomNavButtonFramePreferenceKey: PreferenceKey {
+    static var defaultValue: [FigmaCustomerAppModel.MainTab: CGRect] = [:]
+
+    static func reduce(
+        value: inout [FigmaCustomerAppModel.MainTab: CGRect],
+        nextValue: () -> [FigmaCustomerAppModel.MainTab: CGRect]
+    ) {
+        value.merge(nextValue(), uniquingKeysWith: { _, new in new })
+    }
+}
+
+private enum BottomNavButtonFrameReader {
+    static let coordinateSpaceName = "main-screen-container"
+}
+
+private extension View {
+    func captureBottomNavFrame(for tab: FigmaCustomerAppModel.MainTab) -> some View {
+        background(
+            GeometryReader { proxy in
+                Color.clear.preference(
+                    key: BottomNavButtonFramePreferenceKey.self,
+                    value: [tab: proxy.frame(in: .named(BottomNavButtonFrameReader.coordinateSpaceName))]
+                )
+            }
+        )
+    }
+}
+
+private struct DIYAssistantGuideOverlay: View {
+    let targetFrame: CGRect
+    @State private var handOffset: CGFloat = -4
+    private let targetYOffset: CGFloat = 14
+
+    var body: some View {
+        ZStack {
+            Circle()
+                .fill(FigmaPalette.palePink.opacity(0.45))
+                .frame(width: targetFrame.width + 28, height: targetFrame.height + 28)
+                .position(x: targetFrame.midX, y: targetFrame.midY + targetYOffset)
+
+            Circle()
+                .stroke(FigmaPalette.hotPink.opacity(0.82), lineWidth: 3)
+                .frame(width: targetFrame.width + 22, height: targetFrame.height + 22)
+                .position(x: targetFrame.midX, y: targetFrame.midY + targetYOffset)
+
+            Text("AI 助手")
+                .font(.system(size: 12, weight: .bold))
+                .foregroundColor(.white)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+                .background(
+                    Capsule(style: .continuous)
+                        .fill(FigmaPalette.hotPink)
+                )
+                .shadow(color: FigmaPalette.hotPink.opacity(0.24), radius: 8, x: 0, y: 4)
+                .position(x: targetFrame.midX - 4, y: targetFrame.minY - 74)
+
+            Image(systemName: "hand.point.up.left.fill")
+                .font(.system(size: 58, weight: .bold))
+                .foregroundStyle(FigmaPalette.hotPink)
+                .rotationEffect(.degrees(180))
+                .shadow(color: FigmaPalette.hotPink.opacity(0.34), radius: 12, x: 0, y: 6)
+                .position(x: targetFrame.midX - 18, y: targetFrame.minY - 28)
+                .offset(y: handOffset)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .ignoresSafeArea()
+        .allowsHitTesting(false)
+        .zIndex(10)
+        .onAppear {
+            withAnimation(.easeInOut(duration: 0.9).repeatForever(autoreverses: true)) {
+                handOffset = 10
+            }
         }
     }
 }
