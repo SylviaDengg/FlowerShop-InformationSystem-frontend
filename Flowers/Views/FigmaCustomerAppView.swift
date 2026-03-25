@@ -2720,26 +2720,31 @@ struct StorefrontAssistantRecommendation: Equatable {
     let browseLinkTitle: String
 
     var formattedSummary: String {
-        var sections = [headline]
-        var recommendationLines: [String] = []
+        var sections: [String] = [
+            "### 推薦摘要",
+            headline
+        ]
+
+        var recommendationLines: [String] = ["### 方案內容"]
 
         if let recommendedOfferingName,
            !recommendedOfferingName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            recommendationLines.append("• **\(recommendedOfferingName)**")
+            recommendationLines.append("• **花束**：\(recommendedOfferingName)")
         }
 
         if !recommendedFlowers.isEmpty {
-            recommendationLines.append("花材：\(recommendedFlowers.joined(separator: "、"))")
+            recommendationLines.append("• **花材**：\(recommendedFlowers.joined(separator: "、"))")
         }
 
         if !diySuggestions.isEmpty {
             recommendationLines.append(contentsOf: diySuggestions.map { suggestion in
-                "自訂可選 \(suggestion.categoryName) 類的 \(suggestion.flowerName) \(suggestion.quantityText)"
+                "• **DIY**：\(suggestion.categoryName) 類的 \(suggestion.flowerName) \(suggestion.quantityText)"
             })
         }
 
-        recommendationLines.append("預算參考：\(estimatedPriceText)")
+        recommendationLines.append("• **預算參考**：\(estimatedPriceText)")
         sections.append(recommendationLines.joined(separator: "\n\n"))
+        sections.append("### 下一步")
         sections.append(nextStepHint)
 
         return sections
@@ -6188,13 +6193,9 @@ private struct AssistantSummaryBubble: View {
                 .font(.system(size: 14, weight: .bold))
 
             if let recommendation {
-                structuredRecommendationView(for: recommendation)
+                markdownSummaryView(for: recommendation.formattedSummary)
             } else if let summaryText {
-                VStack(alignment: .leading, spacing: 16) {
-                    ForEach(formattedBlocks(from: summaryText).indices, id: \.self) { index in
-                        blockView(for: formattedBlocks(from: summaryText)[index])
-                    }
-                }
+                markdownSummaryView(for: summaryText)
             }
         }
         .padding(16)
@@ -6218,40 +6219,12 @@ private struct AssistantSummaryBubble: View {
             .filter { !$0.isEmpty }
     }
 
-    private func structuredRecommendationView(for recommendation: StorefrontAssistantRecommendation) -> some View {
+    private func markdownSummaryView(for text: String) -> some View {
         VStack(alignment: .leading, spacing: 16) {
-            Text(recommendation.headline)
-                .font(.system(size: 13, weight: .regular))
-                .foregroundColor(.black.opacity(0.75))
-                .fixedSize(horizontal: false, vertical: true)
-
-            VStack(alignment: .leading, spacing: 14) {
-                if let recommendedOfferingName = recommendation.recommendedOfferingName,
-                   !recommendedOfferingName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    recommendationLine(title: "花束", value: recommendedOfferingName)
-                }
-
-                if !recommendation.recommendedFlowers.isEmpty {
-                    recommendationLine(
-                        title: "花材",
-                        value: recommendation.recommendedFlowers.joined(separator: "、")
-                    )
-                }
-
-                ForEach(Array(recommendation.diySuggestions.enumerated()), id: \.offset) { _, suggestion in
-                    recommendationLine(
-                        title: "自訂可選",
-                        value: "\(suggestion.categoryName) 類的 \(suggestion.flowerName) \(suggestion.quantityText)"
-                    )
-                }
-
-                recommendationLine(title: "預算參考", value: recommendation.estimatedPriceText)
+            let blocks = formattedBlocks(from: text)
+            ForEach(blocks.indices, id: \.self) { index in
+                blockView(for: blocks[index])
             }
-
-            Text(recommendation.nextStepHint)
-                .font(.system(size: 13, weight: .regular))
-                .foregroundColor(.black.opacity(0.75))
-                .fixedSize(horizontal: false, vertical: true)
         }
     }
 
@@ -6261,7 +6234,6 @@ private struct AssistantSummaryBubble: View {
                 paragraphView(for: lines[index])
             }
         }
-        .font(.system(size: 13, weight: .regular))
     }
 
     @ViewBuilder
@@ -6289,13 +6261,6 @@ private struct AssistantSummaryBubble: View {
             .foregroundColor(.black.opacity(0.75))
             .fixedSize(horizontal: false, vertical: true)
         }
-    }
-
-    private func recommendationLine(title: String, value: String) -> some View {
-        Text("• \(title)：\(Text(value).font(.system(size: 13, weight: .regular)))")
-            .font(.system(size: 13, weight: .bold))
-            .foregroundColor(.black.opacity(0.75))
-            .fixedSize(horizontal: false, vertical: true)
     }
 
     private func markdownHeading(from text: String) -> (level: Int, text: String)? {
