@@ -7941,7 +7941,7 @@ private extension View {
 private struct DIYAssistantGuideOverlay: View {
     let targetFrame: CGRect
     @State private var handOffset: CGFloat = -4
-    private let targetYOffset: CGFloat = 14
+    private let targetYOffset: CGFloat = 63
 
     var body: some View {
         ZStack {
@@ -7965,14 +7965,14 @@ private struct DIYAssistantGuideOverlay: View {
                         .fill(FigmaPalette.hotPink)
                 )
                 .shadow(color: FigmaPalette.hotPink.opacity(0.24), radius: 8, x: 0, y: 4)
-                .position(x: targetFrame.midX - 4, y: targetFrame.minY - 74)
+                .position(x: targetFrame.midX - 4, y: targetFrame.minY - 25)
 
             Image(systemName: "hand.point.up.left.fill")
                 .font(.system(size: 58, weight: .bold))
                 .foregroundStyle(FigmaPalette.hotPink)
                 .rotationEffect(.degrees(180))
                 .shadow(color: FigmaPalette.hotPink.opacity(0.34), radius: 12, x: 0, y: 6)
-                .position(x: targetFrame.midX - 18, y: targetFrame.minY - 28)
+                .position(x: targetFrame.midX - 18, y: targetFrame.minY + 20)
                 .offset(y: handOffset)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
