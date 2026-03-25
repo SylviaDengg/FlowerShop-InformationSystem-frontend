@@ -223,11 +223,9 @@ final class FigmaCustomerAppModel: ObservableObject {
     @Published var modelName = ProcessInfo.processInfo.environment["ARK_IMAGE_MODEL"] ?? "doubao-seedream-5-0-250428"
     @Published var assistantAPIKey = ProcessInfo.processInfo.environment["ARK_API_KEY"] ?? ""
     @Published var assistantModelName = ProcessInfo.processInfo.environment["ARK_CHAT_MODEL"] ?? "doubao-seed-2-0-mini-260215"
-    @Published var assistantComposerText = ""
-    @Published var assistantMessages: [StorefrontAssistantMessage] = []
     @Published var assistantConversationStep = 1
     @Published var assistantErrorMessage: String?
-    @Published var isSendingAssistantMessage = false
+    @Published var assistantRecommendation: StorefrontAssistantRecommendation?
     @Published var assistantRecommendationText: String?
     @Published var isGeneratingAssistantRecommendation = false
     @Published var selectedPaymentMethod: CheckoutPaymentMethod = .alipayHK
@@ -268,6 +266,7 @@ final class FigmaCustomerAppModel: ObservableObject {
     private var liveBouquetCatalog: [BouquetData] = []
     private var inventoryStocksByCode: [String: Int] = [:]
     private var lastKnownReminderAvailabilityByKey: [String: Bool] = [:]
+    private var activeAssistantRecommendationRequestID = UUID()
     private var hasResolvedRemoteFlowers = false
     private var hasResolvedRemoteBouquets = false
     private var hasResolvedInventory = false
@@ -408,35 +407,6 @@ final class FigmaCustomerAppModel: ObservableObject {
         }
 
         return nil
-    }
-
-    var assistantCanSendMessage: Bool {
-        !assistantComposerText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            && !isSendingAssistantMessage
-    }
-
-    var assistantDataStatusText: String {
-        var lines: [String] = []
-
-        if hasResolvedRemoteFlowers {
-            lines.append("花材 \(availableFlowers.count) 款")
-        } else {
-            lines.append("花材載入中")
-        }
-
-        if hasResolvedRemoteBouquets {
-            lines.append("花束 \(availableBouquetProducts.count) 款")
-        } else {
-            lines.append("花束載入中")
-        }
-
-        if hasResolvedRemoteWrappingOptions {
-            lines.append("包裝 \(availableWrappingOptions.count) 款")
-        } else {
-            lines.append("包裝載入中")
-        }
-
-        return lines.joined(separator: " · ")
     }
 
     var cartTotalPrice: Double {
@@ -1071,76 +1041,26 @@ final class FigmaCustomerAppModel: ObservableObject {
     }
 
     func resetAssistantChat() {
-        assistantComposerText = ""
+        activeAssistantRecommendationRequestID = UUID()
         assistantErrorMessage = nil
-        isSendingAssistantMessage = false
+        assistantRecommendation = nil
         assistantRecommendationText = nil
         isGeneratingAssistantRecommendation = false
         assistantConversationStep = 1
-        assistantMessages = [
-            StorefrontAssistantMessage(
-                role: .assistant,
-                text: "你好，我已经接上实时数据库了。你可以直接问我现有什么花、价格多少、哪些花束适合送礼，或让我按预算推荐。"
-            )
-        ]
     }
 
     func clearAssistantRecommendation() {
+        activeAssistantRecommendationRequestID = UUID()
+        assistantRecommendation = nil
         assistantRecommendationText = nil
         assistantErrorMessage = nil
         isGeneratingAssistantRecommendation = false
     }
 
-    func sendAssistantPreset(_ text: String) async {
-        guard !isSendingAssistantMessage else { return }
-        assistantComposerText = text
-        await sendAssistantMessage()
-    }
-
-    func sendAssistantMessage() async {
-        let trimmedMessage = assistantComposerText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedMessage.isEmpty, !isSendingAssistantMessage else { return }
-
-        assistantComposerText = ""
-        assistantErrorMessage = nil
-        assistantMessages.append(
-            StorefrontAssistantMessage(
-                role: .user,
-                text: trimmedMessage
-            )
-        )
-
-        isSendingAssistantMessage = true
-        defer {
-            isSendingAssistantMessage = false
-        }
-
-        do {
-            let reply = try await assistantService.reply(
-                history: assistantMessages,
-                context: buildAssistantContext(),
-                apiKey: assistantAPIKey,
-                modelName: assistantModelName
-            )
-            assistantMessages.append(
-                StorefrontAssistantMessage(
-                    role: .assistant,
-                    text: reply
-                )
-            )
-        } catch {
-            let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
-            assistantErrorMessage = message
-            assistantMessages.append(
-                StorefrontAssistantMessage(
-                    role: .assistant,
-                    text: "暂时无法生成回答：\(message)"
-                )
-            )
-        }
-    }
-
     func generateAssistantRecommendation() async {
+        let requestID = UUID()
+        activeAssistantRecommendationRequestID = requestID
+        assistantRecommendation = nil
         assistantRecommendationText = nil
         assistantErrorMessage = nil
         isGeneratingAssistantRecommendation = true
@@ -1149,24 +1069,44 @@ final class FigmaCustomerAppModel: ObservableObject {
             isGeneratingAssistantRecommendation = false
         }
 
+        let fallbackRecommendation = buildFallbackAssistantRecommendation()
         let prompt = """
-        请根据以下顾客需求，基于当前数据库中真实存在的花材、花束、包装和库存，给出最后的购买推荐。
+        你是花店 customer app 的結構化推薦引擎。請根據以下顧客需求，基於目前資料庫中真實存在的花材、花束、包裝和庫存，只返回 JSON，不要返回額外說明。
 
-        顾客需求：
-        - 购买类型：\(selectedPurchaseType)
-        - 收花对象：\(selectedRecipient)
-        - 送花场合：\(selectedOccasion)
-        - 颜色偏好：\(selectedColor)
-        - 预算范围：\(selectedBudget)
+        顧客需求：
+        - 購買類型：\(selectedPurchaseType)
+        - 收花對象：\(selectedRecipient)
+        - 送花場合：\(selectedOccasion)
+        - 顏色偏好：\(selectedColor)
+        - 預算範圍：\(selectedBudget)
 
-        输出要求：
-        - 用中文回答。
-        - 先给一句总体推荐结论。
-        - 再给 2 到 3 个真实可买的推荐，可以是成品花束，也可以是花材组合。
-        - 尽量写出具体名称、价格或预算匹配情况。
-        - 如果数据库里没有完全匹配的选项，要明确说明，并给最接近的推荐。
-        - 最后补一句，告诉用户进入 DIY 时优先看哪类花材或包装。
-        - 不要输出 JSON。
+        輸出格式：
+        {
+          "headline": "一句中文總結",
+          "recommendedOfferingName": "推薦的成品花束名或 null",
+          "recommendedFlowers": ["真實花材1", "真實花材2"],
+          "diySuggestions": [
+            {
+              "categoryName": "花材分類，例如玫瑰",
+              "flowerName": "真實花材名稱，例如粉玫瑰",
+              "quantityText": "建議數量，例如 5枝"
+            }
+          ],
+          "estimatedPriceText": "例如 HKD 168-198",
+          "nextStepHint": "一句引導用戶去瀏覽或 DIY 的中文提示",
+          "browseLinkTitle": "前往真實花材與花束"
+        }
+
+        規則：
+        - recipient、occasion、color 可能是自由輸入，請按語義理解。
+        - purchaseType 和 budget 只能來自給定選項，不要編造新值。
+        - 只使用資料庫裡真實存在的花束、花材與庫存資訊。
+        - 除了推薦現成花束，也一定要提供 diySuggestions，給出 2 到 3 條可實際購買的自訂建議。
+        - 每條 diySuggestions 都要包含花材分類、具體花材名稱、以及建議數量。
+        - quantityText 必須是可直接購買的實際數量，例如「5枝」「2把」，並且要和預算範圍相符。
+        - 如果沒有完全匹配的成品花束，recommendedOfferingName 返回 null，但 diySuggestions 仍然必須提供。
+        - recommendedFlowers 最多 3 項，diySuggestions 最多 3 條。
+        - browseLinkTitle 固定輸出「前往真實花材與花束」。
         """
 
         do {
@@ -1181,8 +1121,22 @@ final class FigmaCustomerAppModel: ObservableObject {
                 apiKey: assistantAPIKey,
                 modelName: assistantModelName
             )
-            assistantRecommendationText = reply
+            guard activeAssistantRecommendationRequestID == requestID else { return }
+            if let decodedRecommendation = decodeAssistantRecommendation(from: reply) {
+                let normalizedRecommendation = normalizeAssistantRecommendation(
+                    decodedRecommendation,
+                    fallback: fallbackRecommendation
+                )
+                assistantRecommendation = normalizedRecommendation
+                assistantRecommendationText = normalizedRecommendation.formattedSummary
+            } else {
+                assistantRecommendation = fallbackRecommendation
+                assistantRecommendationText = fallbackRecommendation.formattedSummary
+            }
         } catch {
+            guard activeAssistantRecommendationRequestID == requestID else { return }
+            assistantRecommendation = fallbackRecommendation
+            assistantRecommendationText = fallbackRecommendation.formattedSummary
             assistantErrorMessage = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
         }
     }
@@ -1806,6 +1760,240 @@ final class FigmaCustomerAppModel: ObservableObject {
                 budget: selectedBudget
             )
         )
+    }
+
+    private func decodeAssistantRecommendation(from rawReply: String) -> StorefrontAssistantRecommendation? {
+        struct Payload: Decodable {
+            struct DIYSuggestionPayload: Decodable {
+                let categoryName: String
+                let flowerName: String
+                let quantityText: String
+            }
+
+            let headline: String
+            let recommendedOfferingName: String?
+            let recommendedFlowers: [String]
+            let diySuggestions: [DIYSuggestionPayload]
+            let estimatedPriceText: String
+            let nextStepHint: String
+            let browseLinkTitle: String
+        }
+
+        let trimmedReply = rawReply.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalizedReply: String
+        if trimmedReply.hasPrefix("```") {
+            normalizedReply = trimmedReply
+                .replacingOccurrences(of: "```json", with: "")
+                .replacingOccurrences(of: "```JSON", with: "")
+                .replacingOccurrences(of: "```", with: "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        } else {
+            normalizedReply = trimmedReply
+        }
+
+        guard let data = normalizedReply.data(using: .utf8),
+              let payload = try? JSONDecoder().decode(Payload.self, from: data) else {
+            return nil
+        }
+
+        let headline = payload.headline.trimmingCharacters(in: .whitespacesAndNewlines)
+        let estimatedPriceText = payload.estimatedPriceText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let nextStepHint = payload.nextStepHint.trimmingCharacters(in: .whitespacesAndNewlines)
+        let browseLinkTitle = payload.browseLinkTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        let offeringName = payload.recommendedOfferingName?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let flowerNames = payload.recommendedFlowers
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        let diySuggestions = payload.diySuggestions
+            .map { suggestion in
+                StorefrontAssistantRecommendation.DIYSuggestion(
+                    categoryName: suggestion.categoryName.trimmingCharacters(in: .whitespacesAndNewlines),
+                    flowerName: suggestion.flowerName.trimmingCharacters(in: .whitespacesAndNewlines),
+                    quantityText: suggestion.quantityText.trimmingCharacters(in: .whitespacesAndNewlines)
+                )
+            }
+            .filter { suggestion in
+                !suggestion.categoryName.isEmpty
+                    && !suggestion.flowerName.isEmpty
+                    && !suggestion.quantityText.isEmpty
+            }
+
+        guard !headline.isEmpty,
+              !estimatedPriceText.isEmpty,
+              !nextStepHint.isEmpty,
+              !browseLinkTitle.isEmpty else {
+            return nil
+        }
+
+        return StorefrontAssistantRecommendation(
+            headline: headline,
+            recommendedOfferingName: offeringName?.isEmpty == true ? nil : offeringName,
+            recommendedFlowers: Array(flowerNames.prefix(3)),
+            diySuggestions: Array(diySuggestions.prefix(3)),
+            estimatedPriceText: estimatedPriceText,
+            nextStepHint: nextStepHint,
+            browseLinkTitle: browseLinkTitle
+        )
+    }
+
+    private func buildFallbackAssistantRecommendation() -> StorefrontAssistantRecommendation {
+        let curatedFlowerNames = recommendedFlowerTypes
+        let availableFlowerNames = availableFlowers
+            .filter { (availableStock(for: $0) ?? $0.stockQuantity ?? 1) > 0 }
+            .map(\.name)
+        let recommendedFlowers = uniquePreservingOrder(curatedFlowerNames + availableFlowerNames)
+            .prefix(3)
+        let diySuggestions = buildDIYRecommendationSuggestions(
+            flowerNames: Array(recommendedFlowers),
+            budget: selectedBudget
+        )
+
+        let recommendedOfferingName: String?
+        switch selectedPurchaseType {
+        case "單枝花", "自訂":
+            recommendedOfferingName = nil
+        default:
+            recommendedOfferingName = pickRecommendedBouquet()?.name
+        }
+
+        let headline: String
+        if let recommendedOfferingName {
+            headline = "推薦你先看「\(recommendedOfferingName)」，這組選擇最貼近你目前的送花需求。"
+        } else if let firstFlower = recommendedFlowers.first {
+            headline = "推薦你先從 \(firstFlower) 這類真實有貨花材開始挑選，會最符合目前需求。"
+        } else {
+            headline = "推薦你先查看真實花材與花束，再決定最合適的送花方案。"
+        }
+
+        let nextStepHint: String
+        if selectedPurchaseType == "自訂" {
+            nextStepHint = "如果想自己搭配，下一步可直接進入 DIY 挑選真實花材與包裝。"
+        } else {
+            nextStepHint = "下一步可前往真實花材與花束頁面比較款式，或直接進入 DIY 調整。"
+        }
+
+        let estimatedPrice = recommendedOfferingName.flatMap { offeringName in
+            availableBouquetProducts.first(where: { $0.name == offeringName })?.priceText
+        } ?? estimatedPriceText
+
+        return StorefrontAssistantRecommendation(
+            headline: headline,
+            recommendedOfferingName: recommendedOfferingName,
+            recommendedFlowers: Array(recommendedFlowers),
+            diySuggestions: diySuggestions,
+            estimatedPriceText: estimatedPrice,
+            nextStepHint: nextStepHint,
+            browseLinkTitle: "前往真實花材與花束"
+        )
+    }
+
+    private func normalizeAssistantRecommendation(
+        _ recommendation: StorefrontAssistantRecommendation,
+        fallback: StorefrontAssistantRecommendation
+    ) -> StorefrontAssistantRecommendation {
+        let diySourceFlowerNames = recommendation.diySuggestions.map(\.flowerName)
+        let recommendationFlowerNames = recommendation.recommendedFlowers
+        let candidateFlowerNames = uniquePreservingOrder(
+            diySourceFlowerNames + recommendationFlowerNames + fallback.recommendedFlowers
+        )
+
+        let normalizedDIYSuggestions = buildDIYRecommendationSuggestions(
+            flowerNames: Array(candidateFlowerNames.prefix(3)),
+            budget: selectedBudget
+        )
+
+        return StorefrontAssistantRecommendation(
+            headline: recommendation.headline,
+            recommendedOfferingName: recommendation.recommendedOfferingName,
+            recommendedFlowers: recommendation.recommendedFlowers.isEmpty
+                ? fallback.recommendedFlowers
+                : recommendation.recommendedFlowers,
+            diySuggestions: normalizedDIYSuggestions.isEmpty
+                ? fallback.diySuggestions
+                : normalizedDIYSuggestions,
+            estimatedPriceText: recommendation.estimatedPriceText,
+            nextStepHint: recommendation.nextStepHint,
+            browseLinkTitle: recommendation.browseLinkTitle
+        )
+    }
+
+    private func buildDIYRecommendationSuggestions(
+        flowerNames: [String],
+        budget: String
+    ) -> [StorefrontAssistantRecommendation.DIYSuggestion] {
+        let quantityPlan: [Int]
+        switch budget {
+        case "小於港幣100元":
+            quantityPlan = [3, 1, 1]
+        case "港幣100-200元":
+            quantityPlan = [5, 2, 1]
+        case "港幣200-300元":
+            quantityPlan = [7, 3, 2]
+        default:
+            quantityPlan = [9, 4, 2]
+        }
+
+        return flowerNames.enumerated().compactMap { index, flowerName in
+            guard let flower = availableFlowers.first(where: { $0.name == flowerName }) else {
+                return nil
+            }
+
+            let plannedQuantity = quantityPlan[min(index, quantityPlan.count - 1)]
+            let stock = availableStock(for: flower) ?? flower.stockQuantity ?? plannedQuantity
+            let finalQuantity = max(1, min(plannedQuantity, stock))
+
+            return StorefrontAssistantRecommendation.DIYSuggestion(
+                categoryName: flower.categoryDisplayName,
+                flowerName: flower.name,
+                quantityText: "\(finalQuantity)\(flower.unitDisplayName)"
+            )
+        }
+    }
+
+    private func pickRecommendedBouquet() -> BouquetProduct? {
+        let availableProducts = availableBouquetProducts.filter { (availableStock(for: $0) ?? 1) > 0 }
+        guard !availableProducts.isEmpty else { return nil }
+
+        let budgetTarget = targetBudgetPrice
+        return availableProducts
+            .sorted { lhs, rhs in
+                let lhsDistance = abs(unitPrice(for: lhs) - budgetTarget)
+                let rhsDistance = abs(unitPrice(for: rhs) - budgetTarget)
+                if lhsDistance == rhsDistance {
+                    return lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
+                }
+                return lhsDistance < rhsDistance
+            }
+            .first
+    }
+
+    private var targetBudgetPrice: Double {
+        switch selectedBudget {
+        case "小於港幣100元":
+            return 90
+        case "港幣100-200元":
+            return 160
+        case "港幣200-300元":
+            return 250
+        default:
+            return 320
+        }
+    }
+
+    private func uniquePreservingOrder(_ values: [String]) -> [String] {
+        var seen = Set<String>()
+        var uniqueValues: [String] = []
+
+        for value in values {
+            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { continue }
+            if seen.insert(trimmed).inserted {
+                uniqueValues.append(trimmed)
+            }
+        }
+
+        return uniqueValues
     }
 
     private var checkoutPickupDate: Date {
@@ -2514,6 +2702,50 @@ struct StorefrontNotificationMessage: Codable, Identifiable, Hashable {
     let referenceID: String
     let createdAt: Date
     var isUnread: Bool
+}
+
+struct StorefrontAssistantRecommendation: Equatable {
+    struct DIYSuggestion: Equatable {
+        let categoryName: String
+        let flowerName: String
+        let quantityText: String
+    }
+
+    let headline: String
+    let recommendedOfferingName: String?
+    let recommendedFlowers: [String]
+    let diySuggestions: [DIYSuggestion]
+    let estimatedPriceText: String
+    let nextStepHint: String
+    let browseLinkTitle: String
+
+    var formattedSummary: String {
+        var sections = [headline]
+        var recommendationLines: [String] = []
+
+        if let recommendedOfferingName,
+           !recommendedOfferingName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            recommendationLines.append("• **\(recommendedOfferingName)**")
+        }
+
+        if !recommendedFlowers.isEmpty {
+            recommendationLines.append("花材：\(recommendedFlowers.joined(separator: "、"))")
+        }
+
+        if !diySuggestions.isEmpty {
+            recommendationLines.append(contentsOf: diySuggestions.map { suggestion in
+                "自訂可選 \(suggestion.categoryName) 類的 \(suggestion.flowerName) \(suggestion.quantityText)"
+            })
+        }
+
+        recommendationLines.append("預算參考：\(estimatedPriceText)")
+        sections.append(recommendationLines.joined(separator: "\n\n"))
+        sections.append(nextStepHint)
+
+        return sections
+            .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+            .joined(separator: "\n\n")
+    }
 }
 
 private struct MainFlowScreen: View {
@@ -3535,6 +3767,7 @@ private struct AssistantJourneyScreen: View {
     @State private var customRecipientText = ""
     @State private var customOccasionText = ""
     @State private var customColorText = ""
+    @State private var recommendationTask: Task<Void, Never>?
 
     private let purchaseTypeOptions = ["單枝花", "花束", "自訂"]
     private let recipientOptions = ["伴侶", "朋友", "家人", "同事"]
@@ -3758,7 +3991,12 @@ private struct AssistantJourneyScreen: View {
                             iconURL: "https://www.figma.com/api/mcp/asset/cfec918e-6097-49d9-a4cd-2e8498f3c787"
                         ) {
                             VStack(spacing: 12) {
-                                if let recommendation = appModel.assistantRecommendationText {
+                                if let recommendation = appModel.assistantRecommendation {
+                                    AssistantSummaryBubble(
+                                        title: "AI 推薦",
+                                        recommendation: recommendation
+                                    )
+                                } else if let recommendation = appModel.assistantRecommendationText {
                                     AssistantSummaryBubble(
                                         title: "AI 推薦",
                                         summaryText: recommendation
@@ -3847,62 +4085,51 @@ private struct AssistantJourneyScreen: View {
 
     private func choosePurchaseType(_ option: String) {
         appModel.selectedPurchaseType = option
-        reveal(step: 2)
+        handleStructuredSelectionChange(nextStep: 2)
     }
 
     private func chooseRecipient(_ option: String) {
         customRecipientText = ""
         appModel.selectedRecipient = option
-        reveal(step: 3)
+        handleStructuredSelectionChange(nextStep: 3)
     }
 
     private func confirmCustomRecipient() {
         let trimmedRecipient = customRecipientText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedRecipient.isEmpty else { return }
         appModel.selectedRecipient = trimmedRecipient
-        reveal(step: 3)
+        handleStructuredSelectionChange(nextStep: 3)
     }
 
     private func chooseOccasion(_ option: String) {
         customOccasionText = ""
         appModel.selectedOccasion = option
-        reveal(step: 4)
+        handleStructuredSelectionChange(nextStep: 4)
     }
 
     private func confirmCustomOccasion() {
         let trimmedOccasion = customOccasionText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedOccasion.isEmpty else { return }
         appModel.selectedOccasion = trimmedOccasion
-        reveal(step: 4)
+        handleStructuredSelectionChange(nextStep: 4)
     }
 
     private func chooseColor(_ option: String) {
         customColorText = ""
         appModel.selectedColor = option
-        reveal(step: 5)
+        handleStructuredSelectionChange(nextStep: 5)
     }
 
     private func confirmCustomColor() {
         let trimmedColor = customColorText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedColor.isEmpty else { return }
         appModel.selectedColor = trimmedColor
-        reveal(step: 5)
+        handleStructuredSelectionChange(nextStep: 5)
     }
 
     private func chooseBudget(_ option: String) {
         appModel.selectedBudget = option
-        pendingStep = 6
-        appModel.clearAssistantRecommendation()
-        Task {
-            try? await Task.sleep(nanoseconds: 450_000_000)
-            await appModel.generateAssistantRecommendation()
-            await MainActor.run {
-                withAnimation(.easeInOut(duration: 0.25)) {
-                    appModel.assistantConversationStep = 6
-                }
-                pendingStep = nil
-            }
-        }
+        scheduleRecommendationRefresh()
     }
 
     private func reveal(step: Int) {
@@ -3920,6 +4147,39 @@ private struct AssistantJourneyScreen: View {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
             withAnimation(.easeOut(duration: 0.25)) {
                 proxy.scrollTo("assistant-bottom", anchor: .bottom)
+            }
+        }
+    }
+
+    private func handleStructuredSelectionChange(nextStep: Int) {
+        appModel.clearAssistantRecommendation()
+
+        if appModel.assistantConversationStep < nextStep {
+            reveal(step: nextStep)
+            return
+        }
+
+        if appModel.assistantConversationStep >= 6 {
+            scheduleRecommendationRefresh()
+        }
+    }
+
+    private func scheduleRecommendationRefresh() {
+        recommendationTask?.cancel()
+        appModel.clearAssistantRecommendation()
+        pendingStep = 6
+
+        recommendationTask = Task {
+            try? await Task.sleep(nanoseconds: 450_000_000)
+            guard !Task.isCancelled else { return }
+
+            await appModel.generateAssistantRecommendation()
+
+            await MainActor.run {
+                withAnimation(.easeInOut(duration: 0.25)) {
+                    appModel.assistantConversationStep = 6
+                }
+                pendingStep = nil
             }
         }
     }
@@ -5295,10 +5555,22 @@ private struct MainScreenContainer<Content: View>: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color.clear)
         .safeAreaInset(edge: .bottom, spacing: 0) {
-            FigmaBottomNavBar(selectedTab: selectedTab) { tab in
-                appModel.selectTab(tab)
+            ZStack(alignment: .top) {
+                Color.white
+
+                VStack(spacing: 0) {
+                    Rectangle()
+                        .fill(Color.black.opacity(0.08))
+                        .frame(height: 1)
+
+                    FigmaBottomNavBar(selectedTab: selectedTab) { tab in
+                        appModel.selectTab(tab)
+                    }
+                    .padding(.top, 10)
+                }
             }
-            .padding(.bottom, 8)
+            .frame(maxWidth: .infinity)
+            .frame(height: 108)
         }
         .coordinateSpace(name: BottomNavButtonFrameReader.coordinateSpaceName)
         .onPreferenceChange(BottomNavButtonFramePreferenceKey.self) { frames in
@@ -5906,16 +6178,23 @@ private struct TypingIndicatorBubble: View {
 
 private struct AssistantSummaryBubble: View {
     let title: String
-    let summaryText: String
+    var summaryText: String? = nil
+    var recommendation: StorefrontAssistantRecommendation? = nil
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text(title)
                 .font(.system(size: 14, weight: .bold))
-            Text(summaryText)
-                .font(.system(size: 13, weight: .regular))
-                .foregroundColor(.black.opacity(0.75))
-                .fixedSize(horizontal: false, vertical: true)
+
+            if let recommendation {
+                structuredRecommendationView(for: recommendation)
+            } else if let summaryText {
+                VStack(alignment: .leading, spacing: 16) {
+                    ForEach(formattedBlocks(from: summaryText).indices, id: \.self) { index in
+                        blockView(for: formattedBlocks(from: summaryText)[index])
+                    }
+                }
+            }
         }
         .padding(16)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -5923,6 +6202,89 @@ private struct AssistantSummaryBubble: View {
             RoundedRectangle(cornerRadius: 18, style: .continuous)
                 .fill(Color(red: 0.85, green: 0.85, blue: 0.85))
         )
+    }
+
+    private func formattedBlocks(from text: String) -> [[String]] {
+        text
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .components(separatedBy: "\n\n")
+            .map { block in
+                block
+                    .components(separatedBy: "\n")
+                    .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                    .filter { !$0.isEmpty }
+            }
+            .filter { !$0.isEmpty }
+    }
+
+    private func structuredRecommendationView(for recommendation: StorefrontAssistantRecommendation) -> some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text(recommendation.headline)
+                .font(.system(size: 13, weight: .regular))
+                .foregroundColor(.black.opacity(0.75))
+                .fixedSize(horizontal: false, vertical: true)
+
+            VStack(alignment: .leading, spacing: 14) {
+                if let recommendedOfferingName = recommendation.recommendedOfferingName,
+                   !recommendedOfferingName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    Text("• 花束：\(Text(recommendedOfferingName).fontWeight(.bold))")
+                        .font(.system(size: 13, weight: .regular))
+                        .foregroundColor(.black.opacity(0.75))
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                if !recommendation.recommendedFlowers.isEmpty {
+                    Text("• 花材：\(Text(recommendation.recommendedFlowers.joined(separator: "、")).fontWeight(.bold))")
+                        .font(.system(size: 13, weight: .regular))
+                        .foregroundColor(.black.opacity(0.75))
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                ForEach(Array(recommendation.diySuggestions.enumerated()), id: \.offset) { _, suggestion in
+                    Text("• 自訂可選 \(Text(suggestion.categoryName).fontWeight(.bold)) 類的 \(Text(suggestion.flowerName).fontWeight(.bold)) \(suggestion.quantityText)")
+                        .font(.system(size: 13, weight: .regular))
+                        .foregroundColor(.black.opacity(0.75))
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                Text("• 預算參考：\(recommendation.estimatedPriceText)")
+                    .font(.system(size: 13, weight: .regular))
+                    .foregroundColor(.black.opacity(0.75))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            Text(recommendation.nextStepHint)
+                .font(.system(size: 13, weight: .regular))
+                .foregroundColor(.black.opacity(0.75))
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private func blockView(for lines: [String]) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            ForEach(lines.indices, id: \.self) { index in
+                paragraphView(for: lines[index])
+            }
+        }
+    }
+
+    private func paragraphView(for paragraph: String) -> some View {
+        Group {
+            if let attributed = try? AttributedString(
+                markdown: paragraph,
+                options: AttributedString.MarkdownParsingOptions(
+                    interpretedSyntax: .inlineOnlyPreservingWhitespace
+                )
+            ) {
+                Text(attributed)
+                    .font(.system(size: 13))
+            } else {
+                Text(paragraph)
+                    .font(.system(size: 13, weight: .regular))
+            }
+        }
+        .foregroundColor(.black.opacity(0.75))
+        .fixedSize(horizontal: false, vertical: true)
     }
 }
 
