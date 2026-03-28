@@ -232,6 +232,7 @@ final class FigmaCustomerAppModel: ObservableObject {
     @Published var isGeneratingAssistantRecommendation = false
     @Published var selectedPaymentMethod: CheckoutPaymentMethod = .alipayHK
     @Published var isShowingCheckoutPriceDetails = false
+    @Published var checkoutSpecialRequests = ""
     @Published var isSubmittingPayment = false
     @Published var isAuthenticating = false
     @Published var paymentErrorMessage: String?
@@ -746,7 +747,7 @@ final class FigmaCustomerAppModel: ObservableObject {
         return "\(timeText(from: start)) - \(timeText(from: end))"
     }
 
-    var checkoutSpecialRequests: String {
+    var defaultCheckoutSpecialRequests: String {
         let trimmedCardMessage = cardMessage.trimmingCharacters(in: .whitespacesAndNewlines)
         if includeGreetingCard, !trimmedCardMessage.isEmpty {
             return trimmedCardMessage
@@ -1036,6 +1037,9 @@ final class FigmaCustomerAppModel: ObservableObject {
             return
         }
 
+        if checkoutSpecialRequests.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            checkoutSpecialRequests = defaultCheckoutSpecialRequests
+        }
         activeTab = .cart
         overlayScreen = .checkout
         isShowingCheckoutPriceDetails = false
@@ -1447,6 +1451,7 @@ final class FigmaCustomerAppModel: ObservableObject {
                         }
                     )
                     self.cartItems = []
+                    self.checkoutSpecialRequests = ""
                     self.isShowingCheckoutPriceDetails = false
                     self.overlayScreen = .orderTracking
                     self.activeTab = .cart
@@ -1708,6 +1713,7 @@ final class FigmaCustomerAppModel: ObservableObject {
         browseMode = .materials
         selectedFlowerCategory = nil
         selectedPaymentMethod = .alipayHK
+        checkoutSpecialRequests = ""
         isShowingCheckoutPriceDetails = false
         isSubmittingPayment = false
         paymentErrorMessage = nil
@@ -4389,16 +4395,28 @@ private struct CheckoutScreen: View {
                                 Text("備註：")
                                     .font(.system(size: 12, weight: .bold))
 
-                                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                                    .stroke(Color.black, lineWidth: 1)
-                                    .frame(height: 62)
-                                    .overlay(alignment: .leading) {
-                                        Text(appModel.checkoutSpecialRequests)
-                                            .font(.system(size: 15, weight: .bold))
-                                            .foregroundColor(.black)
-                                            .padding(.horizontal, 16)
-                                            .lineLimit(2)
+                                ZStack(alignment: .topLeading) {
+                                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                        .stroke(Color.black, lineWidth: 1)
+                                        .frame(height: 96)
+
+                                    if appModel.checkoutSpecialRequests.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                                        Text("請輸入訂單備註")
+                                            .font(.system(size: 15, weight: .regular))
+                                            .foregroundColor(.secondary)
+                                            .padding(.horizontal, 20)
+                                            .padding(.vertical, 14)
+                                            .allowsHitTesting(false)
                                     }
+
+                                    TextEditor(text: $appModel.checkoutSpecialRequests)
+                                        .font(.system(size: 15, weight: .medium))
+                                        .foregroundColor(.black)
+                                        .scrollContentBackground(.hidden)
+                                        .padding(.horizontal, 12)
+                                        .padding(.vertical, 8)
+                                        .frame(height: 96)
+                                }
                             }
 
                             Text(appModel.checkoutPickupWindowText)
@@ -7726,29 +7744,34 @@ private struct FlowerSidebarButton: View {
 
     var body: some View {
         Button(action: action) {
-            HStack(spacing: 8) {
+            ZStack(alignment: .topTrailing) {
                 Text(title)
                     .font(.system(size: 14, weight: isSelected ? .bold : .regular))
                     .foregroundColor(isSelected ? .black : .secondary)
-                    .lineLimit(1)
-
-                Spacer(minLength: 0)
+                    .multilineTextAlignment(.center)
+                    .lineLimit(2)
+                    .minimumScaleFactor(0.8)
+                    .padding(.horizontal, 10)
+                    .padding(.trailing, count > 0 ? 26 : 10)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
 
                 if count > 0 {
                     Text("\(count)")
                         .font(.system(size: 12, weight: .semibold))
                         .foregroundColor(isSelected ? .black : .secondary)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 4)
+                        .frame(minWidth: 22)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 3)
                         .background(
                             Capsule(style: .continuous)
                                 .fill(isSelected ? FigmaPalette.softPink : Color.white.opacity(0.92))
                         )
+                        .padding(.top, 6)
+                        .padding(.trailing, 6)
                 }
             }
-            .padding(.horizontal, 12)
             .frame(maxWidth: .infinity)
-            .frame(height: 48)
+            .frame(height: 54)
             .background(
                 RoundedRectangle(cornerRadius: 10, style: .continuous)
                     .fill(isSelected ? Color.white : Color.clear)
